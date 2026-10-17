@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#10182b">
+    <title>QAI — QA Copilot</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" aria-label="Main navigation">
+            <a class="brand" href="#" data-page="overview" aria-label="QAI overview">
+                <span class="brand-mark" aria-hidden="true">Q</span>
+                <span class="brand-copy"><strong>QAI Copilot</strong><small>Quality workspace</small></span>
+            </a>
+
+            <div class="sidebar-label">WORKSPACE</div>
+            <nav class="primary-nav">
+                <button class="nav-item active" type="button" data-page="overview" aria-current="page">
+                    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"></path></svg><span>Overview</span>
+                </button>
+                <button class="nav-item" type="button" data-page="new-run">
+                    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg><span>New Test Run</span>
+                </button>
+                <button class="nav-item" type="button" data-page="history">
+                    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span>Execution History</span>
+                </button>
+                <button class="nav-item" type="button" data-page="analysis">
+                    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12M12 8v8m-4-4h8"></path></svg><span>AI Bug Analysis</span>
+                </button>
+                <button class="nav-item" type="button" data-page="reports">
+                    <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l5 5v13H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M14 3v5h5M9 13h6m-6 4h6"></path></svg><span>Reports</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <span class="sidebar-footer-mark" aria-hidden="true">✓</span>
+                <span><strong>Testing, with guardrails</strong><small>Runs are bounded and recorded</small></span>
+            </div>
+        </aside>
+
+        <div class="workspace">
+            <header class="topbar">
+                <div>
+                    <div class="eyebrow">QA AUTOMATION WORKSPACE</div>
+                    <h1 id="pageTitle">Overview</h1>
+                </div>
+                <div class="topbar-actions">
+                    <div id="backendStatus" class="connection-status" data-status="checking" role="status">
+                        <span class="status-dot" aria-hidden="true"></span>
+                        <span id="backendStatusText">Checking backend</span>
+                    </div>
+                    <button id="refreshDashboardBtn" class="icon-button" type="button" aria-label="Refresh dashboard and history" title="Refresh">
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"></path></svg><span class="refresh-label">Refresh</span>
+                    </button>
+                    <div class="avatar" aria-label="QAI workspace">QA</div>
+                </div>
+            </header>
+
+            <main class="page-content">
+                <section id="overviewSection" class="page-panel active" data-page-panel="overview">
+                    <div class="overview-dashboard">
+                        <div class="page-intro">
+                            <div>
+                                <p class="eyebrow">PROJECT SNAPSHOT</p>
+                                <h2>Your testing at a glance</h2>
+                                <p class="muted">Live metrics from saved execution history.</p>
+                            </div>
+                            <button class="primary-button compact-button" type="button" data-page="new-run"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg> Start a test run</button>
+                        </div>
+
+                        <p id="overviewStatusMessage" class="history-message" role="status" aria-live="polite"></p>
+                        <div class="stats-grid" aria-label="Execution summary">
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Total runs</span><span class="stat-icon blue" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8m-8 4h8m-8 4h5"></path></svg></span></div>
+                                <strong id="totalRunsStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Saved executions</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Completed</span><span class="stat-icon green" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></svg></span></div>
+                                <strong id="passedRunsStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Execution completed; not necessarily assertions passed</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Failed</span><span class="stat-icon red" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6m0-6-6 6"></path></svg></span></div>
+                                <strong id="failedRunsStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Run execution ended with a failure status</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Bugs detected</span><span class="stat-icon purple" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5m0 4h.01M5 11H3m3-5L4.5 4.5M19 11h2m-3-5 1.5-1.5M7 14a5 5 0 0 0 10 0V9H7zM9 19v2h6v-2"></path></svg></span></div>
+                                <strong id="bugsDetectedStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Persisted bug records</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Cancelled</span></div>
+                                <strong id="cancelledRunsStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Execution cancelled before completion</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Assertions passed</span></div>
+                                <strong id="assertionsPassedStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Persisted assertion steps</span>
+                            </article>
+                            <article class="stat-card">
+                                <div class="stat-heading"><span>Assertions failed</span></div>
+                                <strong id="assertionsFailedStat" class="stat-value">—</strong>
+                                <span class="stat-caption">Failed assertion steps</span>
+                            </article>
+                        </div>
+
+                        <section class="surface-card recent-card">
+                            <div class="section-heading">
+                                <div><h2>Recent test runs</h2><p class="muted">Latest saved activity from your workspace.</p></div>
+                                <button class="text-button" type="button" data-page="history">View execution history <span aria-hidden="true">→</span></button>
+                            </div>
+                            <div class="table-wrap">
+                                <table class="data-table">
+                                    <thead><tr><th scope="col">Run name</th><th scope="col">Platform</th><th scope="col">Status</th><th scope="col">Date</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                                    <tbody id="overviewRecentRuns">
+                                        <tr><td colspan="5" class="empty-cell">Loading saved runs…</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </div>
+
+                    <section id="bugAnalysisCard" class="surface-card bug-analysis-card">
+                        <div class="section-heading">
+                            <div>
+                                <p class="eyebrow">AI-ASSISTED TRIAGE</p>
+                                <h2>Describe a bug</h2>
+                                <p class="muted">Turn a tester observation into a structured QA report.</p>
+                            </div>
+                            <span class="ai-chip"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12M12 8v8m-4-4h8"></path></svg> Gemini</span>
+                        </div>
+                        <label class="field-label" for="bugInput">Tester observation</label>
+                        <textarea id="bugInput" class="bug-input" placeholder="Example: When I upload a profile picture and crop it, the image is not updated on my profile."></textarea>
+                        <div class="analysis-actions">
+                            <span class="field-hint">Do not include passwords, tokens, or other secrets.</span>
+                            <button id="analyzeBtn" class="primary-button" type="button">Analyze bug <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"></path></svg></button>
+                        </div>
+                        <div id="loading" class="loading hidden" role="status">Analyzing bug with AI…</div>
+                        <div id="result" class="result" aria-live="polite">
+                            <p class="placeholder">Your AI-generated QA report will appear here.</p>
+                        </div>
+                    </section>
+                </section>
+
+                <section id="newRunSection" class="page-panel" data-page-panel="new-run" hidden>
+                    <div class="page-intro">
+                        <div><p class="eyebrow">WEBSITE AUTOMATION</p><h2>Configure a test run</h2>
+                            <p class="muted">Run a focused login check or explore a site with bounded, safety-checked actions.</p></div>
+                    </div>
+                    <section class="surface-card run-section">
+                        <div class="section-heading">
+                            <div><h2>Test configuration</h2><p class="muted">Only test websites you are authorized to access.</p></div>
+                            <span class="secure-chip"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"></path><path d="m9 12 2 2 4-4"></path></svg> Safety limits active</span>
+                        </div>
+                        <form id="websiteRunForm" class="run-form">
+                            <div class="form-group">
+                                <div class="form-section-heading"><span class="step-number">01</span><div><h3>Run details</h3><p>Name your test and choose how it should run.</p></div></div>
+                                <div class="field-grid">
+                                    <label>Test name<input id="runName" type="text" maxlength="120" required value="Invalid login check"></label>
+                                    <label>Testing mode
+                                        <select id="runMode">
+                                            <option value="user-directed">Configured invalid-login test</option>
+                                            <option value="autonomous-exploration">Bounded autonomous exploration</option>
+                                        </select>
+                                    </label>
+                                    <label class="wide-field">Website URL<input id="runTarget" type="url" maxlength="2048" required placeholder="https://your-authorized-test-site.example/login"></label>
+                                    <label class="wide-field">Additional allowed hostnames <span class="optional-label">Optional, comma-separated</span>
+                                        <input id="runAllowedHosts" type="text" maxlength="2000" placeholder="docs.your-authorized-site.example">
+                                        <span class="field-hint">Additional exact public hostnames permitted during exploration.</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <div class="form-section-heading"><span class="step-number">02</span><div><h3>Test objective</h3><p>Describe what the run should verify.</p></div></div>
+                                <div class="field-grid">
+                                    <label class="wide-field">Natural-language goal
+                                        <textarea id="runGoal" maxlength="10000" required>Open the login screen, submit invalid test credentials, and verify that login is rejected.</textarea>
+                                    </label>
+                                    <label class="wide-field">Expected results <span class="optional-label">One per line</span>
+                                        <textarea id="runExpected" rows="3" placeholder="The configured rejection message is visible.">The configured rejection message is visible.</textarea>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <div class="form-section-heading"><span class="step-number">03</span><div><h3>Execution limits</h3><p>Set a bounded step count and run timeout.</p></div></div>
+                                <div class="field-grid field-grid-compact">
+                                    <label>Maximum steps<input id="runMaxSteps" type="number" min="6" max="1000" value="20" required></label>
+                                    <label>Execution timeout (seconds)<input id="runTimeout" type="number" min="1" max="3600" value="120" required></label>
+                                    <label class="autonomous-only-field checkbox-field">
+                                        <input id="allowFormSubmission" type="checkbox">
+                                        <span>Allow safe form submissions</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="form-group login-settings">
+                                <div class="form-section-heading"><span class="step-number">04</span><div><h3>Login check settings</h3><p>CSS selectors and synthetic credentials are used only for the configured login mode.</p></div></div>
+                                <div class="field-grid">
+                                    <label class="login-only-field">Username field CSS selector<input id="loginUsernameSelector" type="text" maxlength="500" required placeholder="#username"></label>
+                                    <label class="login-only-field">Password field CSS selector<input id="loginPasswordSelector" type="text" maxlength="500" required placeholder="#password"></label>
+                                    <label class="login-only-field">Submit control CSS selector<input id="loginSubmitSelector" type="text" maxlength="500" required placeholder="button[type='submit']"></label>
+                                    <label class="login-only-field">Rejection indicator CSS selector<input id="rejectionSelector" type="text" maxlength="500" required placeholder=".error-message"></label>
+                                    <label class="login-only-field">Expected rejection text <span class="optional-label">Optional</span><input id="rejectionText" type="text" maxlength="1000" placeholder="Invalid username or password"></label>
+                                    <label class="login-only-field">Authenticated-state CSS selector <span class="optional-label">Optional</span><input id="authenticatedSelector" type="text" maxlength="500" placeholder=".account-menu"></label>
+                                    <label class="login-only-field">Synthetic test username<input id="testUsername" type="text" maxlength="320" value="qai-invalid-user@example.invalid" required></label>
+                                    <label class="login-only-field">Synthetic test password<input id="testPassword" type="password" maxlength="1024" value="QAI-invalid-password-not-a-real-secret" required autocomplete="new-password"></label>
+                                </div>
+                            </div>
+
+                            <div class="form-actions">
+                                <button id="startRunBtn" class="primary-button" type="submit"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"></path></svg> Create and run test</button>
+                                <button id="cancelRunBtn" type="button" class="secondary-button hidden">Cancel test</button>
+                            </div>
+                        </form>
+                    </section>
+                    <section class="surface-card live-run-card" aria-live="polite">
+                        <div class="section-heading"><div><h2>Live execution</h2><p class="muted">Step outcomes appear here while a run is active.</p></div><span class="live-indicator"><span></span> Run status</span></div>
+                        <div id="runStatus" class="run-status"></div>
+                        <div id="runSteps" class="run-steps"></div>
+                    </section>
+                </section>
+
+                <section id="historySection" class="page-panel" data-page-panel="history" hidden>
+                    <div class="page-intro">
+                        <div><p class="eyebrow">SAVED EXECUTIONS</p><h2>Execution history</h2><p class="muted">Search and filter recorded test runs, then open their evidence and reports.</p></div>
+                    </div>
+                    <section class="surface-card history-section">
+                        <div class="history-toolbar">
+                            <label class="search-field"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg><input id="historySearch" type="search" placeholder="Search this page by run name or ID" aria-label="Search current page of execution history"></label>
+                            <div class="history-filters">
+                                <label>Status<select id="historyStatus">
+                                    <option value="">All statuses</option><option value="pending">Pending</option><option value="running">Running</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option>
+                                </select></label>
+                                <label>Platform<select id="historyPlatform">
+                                    <option value="">All platforms</option><option value="website">Website</option><option value="android">Android</option>
+                                </select></label>
+                                <button id="refreshHistoryBtn" class="secondary-button" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"></path></svg> Refresh</button>
+                            </div>
+                        </div>
+                        <p id="historyStatusMessage" class="history-message" aria-live="polite"></p>
+                        <div id="historyList" class="table-wrap history-list"></div>
+                        <div class="history-pagination">
+                            <button id="historyPreviousBtn" class="secondary-button" type="button">← Previous</button>
+                            <span id="historyPageLabel"></span>
+                            <button id="historyNextBtn" class="secondary-button" type="button">Next →</button>
+                        </div>
+                    </section>
+                </section>
+
+                <section id="reportsSection" class="page-panel" data-page-panel="reports" hidden>
+                    <div class="page-intro">
+                        <div><p class="eyebrow">TEST EVIDENCE</p><h2>Run details &amp; reports</h2><p class="muted">Review recorded outcomes, screenshots, execution logs, and downloadable reports.</p></div>
+                        <button class="secondary-button" type="button" data-page="history">← Back to history</button>
+                    </div>
+                    <section id="historyDetails" class="surface-card history-details">
+                        <div class="empty-state"><span class="empty-state-icon" aria-hidden="true">▤</span><h3>Select a test run</h3><p>Open a run from Execution History to view its steps, evidence, logs, and reports.</p></div>
+                    </section>
+                </section>
+            </main>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

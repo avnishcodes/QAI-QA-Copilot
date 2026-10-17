@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.qai-api-token
+backend/qai.db
+backend/generated_reports/
+evidence/
+venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.db-wal
+*.db-shm
