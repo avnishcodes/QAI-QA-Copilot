@@ -29,6 +29,8 @@ class TestApiSecurity(unittest.TestCase):
             ("get", f"/test-runs/{run_id}/reports/html"),
             ("get", f"/test-runs/{run_id}/reports/excel"),
             ("get", f"/test-runs/{run_id}/steps/1/screenshot"),
+            ("get", f"/test-runs/{run_id}/browser-errors"),
+            ("post", f"/test-runs/{run_id}/analyze"),
             ("post", "/analyze-bug"),
         )
         for method, path in requests:

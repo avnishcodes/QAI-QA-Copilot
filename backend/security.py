@@ -120,11 +120,15 @@ def bootstrap_session(request: Request, response: Response) -> None:
     session = hmac.new(
         API_TOKEN.encode("utf-8"), nonce.encode("utf-8"), hashlib.sha256
     ).hexdigest() + "." + nonce
+    is_secure = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto") == "https"
+    )
     response.set_cookie(
         SESSION_COOKIE,
         session,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=is_secure,
         path="/",
     )

@@ -1,0 +1,61 @@
+services:
+  qai-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qai-qa-copilot
+    restart: unless-stopped
+    # Port 8000 is intentionally NOT published to the host network interface.
+    # It is accessible solely by other containers on internal-net (such as Caddy).
+    expose:
+      - "8000"
+    environment:
+      - QAI_DATABASE_PATH=/app/data/qai.db
+      - QAI_API_TOKEN=${QAI_API_TOKEN:?QAI_API_TOKEN must be set in environment}
+      - QAI_FRONTEND_ORIGINS=https://${STAGING_DOMAIN:-qai.internal.example.com}
+      - QAI_ALLOWED_API_HOSTS=${STAGING_DOMAIN:-qai.internal.example.com},qai-app:8000
+      - QAI_ALLOWED_HOSTS=${QAI_ALLOWED_HOSTS:?QAI_ALLOWED_HOSTS must be set to an explicit target allowlist (e.g. *.staging.example.com)}
+      - QAI_MAX_CONCURRENT_WEBSITE_RUNS=${QAI_MAX_CONCURRENT_WEBSITE_RUNS:-2}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-1.5-flash}
+    volumes:
+      - qai_data:/app/data
+      - qai_evidence:/app/evidence
+      - qai_reports:/app/backend/generated_reports
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - internal-net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: qai-caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - STAGING_DOMAIN=${STAGING_DOMAIN:-qai.internal.example.com}
+      - STAGING_BASIC_AUTH_HASH=${STAGING_BASIC_AUTH_HASH:?STAGING_BASIC_AUTH_HASH must be set in environment}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - internal-net
+    depends_on:
+      - qai-app
+
+networks:
+  internal-net:
+    driver: bridge
+
+volumes:
+  qai_data:
+    name: qai_copilot_data
+  qai_evidence:
+    name: qai_copilot_evidence
+  qai_reports:
+    name: qai_copilot_reports
+  caddy_data:
+  caddy_config:

@@ -1,5 +1,6 @@
+import json
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -19,10 +20,9 @@ class Schema(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class TestRunCreate(Schema):
+class TestRunBase(Schema):
     run_name: str = Field(min_length=1, max_length=120)
     platform: RunPlatform
-    mode: CreateRunMode
     target: str = Field(min_length=1, max_length=2048)
     goal: str = Field(min_length=1, max_length=10000)
     expected_results: list[str] = Field(default_factory=list, max_length=100)
@@ -36,6 +36,10 @@ class TestRunCreate(Schema):
     rejection_selector: str | None = Field(default=None, max_length=500)
     rejection_text: str | None = Field(default=None, max_length=1000)
     authenticated_selector: str | None = Field(default=None, max_length=500)
+
+
+class TestRunCreate(TestRunBase):
+    mode: CreateRunMode
 
     @field_validator("expected_results")
     @classmethod
@@ -86,7 +90,7 @@ class TestRunCreate(Schema):
         return self
 
 
-class TestRun(TestRunCreate):
+class TestRun(TestRunBase):
     mode: RunMode
     id: str
     status: RunStatus
@@ -278,8 +282,112 @@ class StartTestRunRequest(Schema):
         max_length=1024,
     )
 
+    @field_validator("username", mode="before")
+    @classmethod
+    def normalize_username(cls, value: Any) -> str:
+        if isinstance(value, bool):
+            raise ValueError("Synthetic username cannot be a boolean.")
+        if isinstance(value, (int, float)):
+            value = str(int(value))
+        elif not isinstance(value, str):
+            raise ValueError(
+                "Synthetic username must be a string or numeric identifier."
+            )
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Synthetic username cannot be blank.")
+        return trimmed
+
 
 class BugRecord(BugRecordCreate):
     id: str
     run_id: str
     created_at: datetime
+
+
+class AIBugReportCreate(Schema):
+    observation: str = Field(min_length=1, max_length=10000)
+    run_id: str | None = Field(default=None, max_length=120)
+
+    @field_validator("observation")
+    @classmethod
+    def observation_must_not_be_blank(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Bug observation cannot be blank.")
+        return trimmed
+
+    @field_validator("run_id")
+    @classmethod
+    def run_id_must_be_valid_uuid(cls, value: str | None) -> str | None:
+        if value is not None:
+            UUID(value)
+        return value
+
+
+class AIBugReport(Schema):
+    id: str
+    run_id: str | None = None
+    observation: str
+    title: str
+    report_markdown: str
+    model: str
+    created_at: datetime
+
+
+class AIBugReportHistoryPage(Schema):
+    items: list[AIBugReport]
+    total: int
+    limit: int
+    offset: int
+
+
+BrowserErrorCategory = Literal[
+    "page_error", "console_error", "http_error", "request_failed"
+]
+
+
+class BrowserErrorCreate(Schema):
+    step_number: int | None = Field(default=None, ge=1)
+    category: BrowserErrorCategory
+    message: str = Field(min_length=1, max_length=5000)
+    url: str | None = Field(default=None, max_length=2048)
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    resource_type: str | None = Field(default=None, max_length=50)
+    timestamp: datetime | None = None
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Browser error message cannot be blank.")
+        return trimmed
+
+
+class BrowserError(BrowserErrorCreate):
+    id: str
+    run_id: str
+    timestamp: datetime
+
+
+class TestRunAnalysisRequest(Schema):
+    force_refresh: bool = False
+    browser_error_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_raw_json(cls, data: Any) -> Any:
+        if isinstance(data, str) and data.strip():
+            try:
+                return json.loads(data)
+            except Exception:
+                return data
+        return data
+
+    @field_validator("browser_error_ids", mode="before")
+    @classmethod
+    def default_none_browser_error_ids(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        return value

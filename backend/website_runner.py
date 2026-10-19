@@ -7,8 +7,8 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Iterable
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from typing import Any, Callable, Iterable
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 from playwright.sync_api import Browser, Page, Route, sync_playwright
 
@@ -16,6 +16,8 @@ from backend import database
 from backend.schemas import (
     AutonomousAction,
     AutonomousActionPlan,
+    BrowserErrorCategory,
+    BrowserErrorCreate,
     BugRecordCreate,
     StartTestRunRequest,
     TestRun,
@@ -36,6 +38,7 @@ _BLOCKED_IPS = {ipaddress.ip_address("168.63.129.16")}
 _MAX_AUTONOMOUS_STEPS = 50
 _MAX_AUTONOMOUS_NAVIGATIONS = 5
 _MAX_AUTONOMOUS_ACTION_MS = 5000
+_MAX_AUTONOMOUS_NAVIGATION_MS = 15000
 _AI_PLAN_TIMEOUT_SECONDS = 4
 _AI_PLAN_SLOTS = threading.BoundedSemaphore(2)
 _SENSITIVE_TEXT = re.compile(
@@ -49,6 +52,246 @@ _SENSITIVE_PATH = re.compile(
 _SENSITIVE_FORM_NAME = re.compile(
     r"(?i)(password|passwd|token|secret|api[_-]?key|auth)"
 )
+_SENSITIVE_PARAM_NAMES = re.compile(
+    r"(?i)^(.*[_-])?(password|passwd|token|api[_-]?key|secret|auth|jwt|session|signature|access[_-]?token)(.*)?$"
+)
+
+
+def sanitize_browser_url(url: str | None) -> str | None:
+    if url is None or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return ""
+    if url.startswith(("about:", "data:", "blob:", "javascript:")):
+        if len(url) > 100:
+            return url[:97] + "..."
+        return url
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return url[:2048]
+
+    hostname = parsed.hostname
+    if hostname:
+        if parsed.port:
+            netloc = f"{hostname}:{parsed.port}"
+        else:
+            netloc = hostname
+    else:
+        netloc = parsed.netloc
+
+    if parsed.query:
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        sanitized_pairs: list[tuple[str, str]] = []
+        for key, value in pairs:
+            if _SENSITIVE_PARAM_NAMES.match(key):
+                sanitized_pairs.append((key, "[REDACTED]"))
+            elif _SENSITIVE_TEXT.search(value):
+                sanitized_pairs.append((key, "[REDACTED]"))
+            else:
+                sanitized_pairs.append((key, value))
+        sanitized_query = urlencode(sanitized_pairs)
+    else:
+        sanitized_query = ""
+
+    sanitized = urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        sanitized_query,
+        "",
+    ))
+    return sanitized[:2048]
+
+
+class BrowserErrorCollector:
+    def __init__(
+        self,
+        run_id: str,
+        cancel_event: threading.Event,
+        step_getter: Callable[[], int | None],
+        database_path: str | Path | None = None,
+    ):
+        self.run_id = run_id
+        self.cancel_event = cancel_event
+        self.step_getter = step_getter
+        self.database_path = database_path
+        self._seen: set[tuple[str, str, int | None, str]] = set()
+        self._lock = threading.Lock()
+
+    def record_finding(
+        self,
+        category: BrowserErrorCategory,
+        message: str,
+        url: str | None = None,
+        http_status: int | None = None,
+        resource_type: str | None = None,
+    ) -> None:
+        if self.cancel_event.is_set():
+            return
+
+        clean_message = " ".join(message.strip().split())
+        if not clean_message:
+            return
+
+        sanitized_url = sanitize_browser_url(url)
+        normalized_key = (
+            category,
+            sanitized_url or "",
+            http_status,
+            clean_message[:300],
+        )
+
+        with self._lock:
+            if normalized_key in self._seen:
+                return
+            self._seen.add(normalized_key)
+
+        step_number = self.step_getter()
+        error_create = BrowserErrorCreate(
+            step_number=step_number,
+            category=category,
+            message=clean_message[:5000],
+            url=sanitized_url,
+            http_status=http_status,
+            resource_type=resource_type[:50] if resource_type else None,
+        )
+        try:
+            database.add_browser_error(
+                self.run_id,
+                error_create,
+                database_path=self.database_path,
+            )
+            short_msg = clean_message[:200]
+            database.add_execution_log(
+                self.run_id,
+                "browser_finding",
+                f"[{category}] {short_msg}",
+                database_path=self.database_path,
+            )
+        except Exception:
+            pass
+
+    def attach_to_page(self, page: Any) -> None:
+        if not hasattr(page, "on"):
+            return
+
+        def on_page_error(error: Any) -> None:
+            if self.cancel_event.is_set():
+                return
+            msg = str(error)
+            page_url = None
+            try:
+                page_url = page.url
+            except Exception:
+                pass
+            self.record_finding("page_error", msg, url=page_url)
+
+        def on_console(msg: Any) -> None:
+            if self.cancel_event.is_set():
+                return
+            try:
+                msg_type = msg.type
+            except Exception:
+                msg_type = ""
+            if msg_type == "error":
+                text = ""
+                try:
+                    text = msg.text
+                except Exception:
+                    pass
+                msg_url = None
+                try:
+                    location = msg.location
+                    if isinstance(location, dict):
+                        msg_url = location.get("url")
+                except Exception:
+                    pass
+                if not msg_url:
+                    try:
+                        msg_url = page.url
+                    except Exception:
+                        pass
+                self.record_finding("console_error", text or "Console error", url=msg_url)
+
+        def on_response(response: Any) -> None:
+            if self.cancel_event.is_set():
+                return
+            try:
+                status = response.status
+            except Exception:
+                return
+            if 400 <= status <= 599:
+                status_text = ""
+                try:
+                    status_text = response.status_text or ""
+                except Exception:
+                    pass
+                resp_url = None
+                try:
+                    resp_url = response.url
+                except Exception:
+                    pass
+                res_type = None
+                try:
+                    res_type = response.request.resource_type
+                except Exception:
+                    pass
+                msg = f"HTTP {status} {status_text}".strip()
+                self.record_finding(
+                    "http_error",
+                    msg,
+                    url=resp_url,
+                    http_status=status,
+                    resource_type=res_type,
+                )
+
+        def on_request_failed(request: Any) -> None:
+            if self.cancel_event.is_set():
+                return
+            try:
+                failure_text = str(request.failure or "").lower()
+            except Exception:
+                failure_text = ""
+
+            normalized_failure = re.sub(r"[\s_-]", "", failure_text)
+            if "blockedbyclient" in normalized_failure:
+                return
+            if (
+                "erraborted" in normalized_failure
+                or "bindingaborted" in normalized_failure
+                or "err_aborted" in failure_text
+                or "binding_aborted" in failure_text
+            ):
+                return
+
+            req_url = None
+            try:
+                req_url = request.url
+            except Exception:
+                pass
+            res_type = None
+            try:
+                res_type = request.resource_type
+            except Exception:
+                pass
+            raw_failure = getattr(request, "failure", None) or "Unknown failure"
+            msg = f"Request failed: {raw_failure}"
+            self.record_finding(
+                "request_failed",
+                msg,
+                url=req_url,
+                resource_type=res_type,
+            )
+
+        try:
+            page.on("pageerror", on_page_error)
+            page.on("console", on_console)
+            page.on("response", on_response)
+            page.on("requestfailed", on_request_failed)
+        except Exception:
+            pass
 
 
 class TargetValidationError(ValueError):
@@ -384,19 +627,67 @@ def _is_safe_navigation_url(
     return _host_is_allowed(host)
 
 
+def _check_expected_outcome_on_page(
+    page: Page,
+    outcome: str,
+    rejection_selector: str | None = None,
+) -> tuple[bool, str]:
+    if not outcome or page.url == "about:blank":
+        return False, ""
+    outcome_clean = outcome.strip()
+    if not outcome_clean:
+        return False, ""
+
+    if rejection_selector:
+        try:
+            rej_loc = page.locator(rejection_selector)
+            if rej_loc.is_visible():
+                text = _redact_text(rej_loc.inner_text().strip())
+                if outcome_clean.casefold() in text.casefold():
+                    return True, text[:300]
+        except Exception:
+            pass
+
+    try:
+        body_text = _redact_text(page.locator("body").inner_text())
+        if outcome_clean.casefold() in body_text.casefold():
+            idx = body_text.casefold().find(outcome_clean.casefold())
+            start = max(0, idx - 40)
+            end = min(len(body_text), idx + len(outcome_clean) + 40)
+            snippet = body_text[start:end].strip()
+            return True, snippet[:300]
+    except Exception:
+        pass
+
+    return False, ""
+
+
 def _observe_page(
     page: Page,
     target_host: str,
     allowed_hosts: list[str],
     allow_form_submission: bool = False,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    selector_probe = (
+        "h1, h2, h3, h4, h5, h6, [role='heading'], "
+        "a[href], button, [role='button'], input[type='button'], "
+        "input, textarea, select, div[role='button'], div[tabindex='0']"
+    )
+    if page.locator(selector_probe).count() == 0:
+        try:
+            page.wait_for_selector(selector_probe, state="visible", timeout=2000)
+        except Exception:
+            pass
+
     candidates: dict[str, dict[str, object]] = {}
     headings: list[dict[str, str]] = []
     links: list[dict[str, object]] = []
     buttons: list[dict[str, object]] = []
     inputs: list[dict[str, object]] = []
     forms: list[dict[str, object]] = []
-    heading_locator = page.locator("h1, h2, h3, h4")
+
+    seen_heading_texts: set[str] = set()
+    heading_locator = page.locator("h1, h2, h3, h4, h5, h6, [role='heading']")
     for index in range(min(heading_locator.count(), 30)):
         locator = heading_locator.nth(index)
         if not locator.is_visible():
@@ -406,21 +697,30 @@ def _observe_page(
             continue
         element_id = f"heading-{index}"
         headings.append({"id": element_id, "text": text})
-        candidates[element_id] = {"kind": "heading", "locator": locator, "text": text}
+        if text.casefold() not in seen_heading_texts:
+            seen_heading_texts.add(text.casefold())
+            candidates[element_id] = {"kind": "heading", "locator": locator, "text": text}
 
+    seen_destinations: set[str] = set()
     link_locator = page.locator("a[href]")
     for index in range(min(link_locator.count(), 50)):
         locator = link_locator.nth(index)
         if not locator.is_visible():
             continue
         href = locator.get_attribute("href")
-        if not href:
+        if not href or href.strip() in {"", "#"} or href.strip().lower().startswith("javascript:"):
             continue
         destination = urljoin(page.url, href)
         approved = _is_safe_navigation_url(destination, target_host, allowed_hosts)
         parsed = urlsplit(destination)
         approved = approved and not parsed.query and not parsed.fragment
-        text = _redact_text(locator.inner_text().strip())[:200] or "Unlabeled link"
+        text = _redact_text(
+            (
+                locator.get_attribute("aria-label")
+                or locator.get_attribute("title")
+                or locator.inner_text()
+            ).strip()
+        )[:200] or "Unlabeled link"
         element_id = f"link-{index}"
         entry: dict[str, object] = {
             "id": element_id,
@@ -429,15 +729,20 @@ def _observe_page(
         }
         if approved:
             entry["url"] = destination
-            candidates[element_id] = {
-                "kind": "link",
-                "locator": locator,
-                "text": text,
-                "url": destination,
-            }
+            if destination not in seen_destinations:
+                seen_destinations.add(destination)
+                candidates[element_id] = {
+                    "kind": "link",
+                    "locator": locator,
+                    "text": text,
+                    "url": destination,
+                }
         links.append(entry)
 
-    button_locator = page.locator("button")
+    seen_button_labels: set[str] = set()
+    button_locator = page.locator(
+        "button, [role='button'], input[type='button'], div[role='button'], div[tabindex='0']"
+    )
     safe_button_labels = {
         "show more",
         "load more",
@@ -452,22 +757,41 @@ def _observe_page(
         "hide details",
         "apply filter",
         "show results",
+        "next",
+        "previous",
+        "more",
+        "details",
+        "tab",
+        "accordion",
+        "view more",
     }
     for index in range(min(button_locator.count(), 30)):
         locator = button_locator.nth(index)
         if not locator.is_visible():
             continue
-        text = _redact_text(locator.inner_text().strip())[:200]
-        button_type = locator.get_attribute("type") or "submit"
+        tag = locator.evaluate("(element) => element.tagName.toLowerCase()")
+        if tag == "div" and locator.locator("input, textarea, select, button, a[href]").count() > 0:
+            continue
+        text = _redact_text(
+            (
+                locator.get_attribute("aria-label")
+                or locator.get_attribute("title")
+                or locator.get_attribute("value")
+                or locator.inner_text()
+            ).strip()
+        )[:200]
+        button_type = locator.get_attribute("type") or "button"
         inside_form = locator.evaluate(
             "(element) => element.closest('form') !== null"
         )
         enabled = locator.is_enabled()
+        aria_expanded = locator.get_attribute("aria-expanded")
         safe_to_click = (
             enabled
-            and button_type == "button"
+            and button_type in {"button", "reset"}
             and not inside_form
-            and text.casefold() in safe_button_labels
+            and (text.casefold() in safe_button_labels or aria_expanded is not None)
+            and not _SENSITIVE_PATH.search(text)
         )
         element_id = f"button-{index}"
         buttons.append(
@@ -479,11 +803,13 @@ def _observe_page(
             }
         )
         if safe_to_click:
-            candidates[element_id] = {
-                "kind": "button",
-                "locator": locator,
-                "text": text,
-            }
+            if text.casefold() not in seen_button_labels:
+                seen_button_labels.add(text.casefold())
+                candidates[element_id] = {
+                    "kind": "button",
+                    "locator": locator,
+                    "text": text,
+                }
 
     form_locator = page.locator("form")
     for index in range(min(form_locator.count(), 20)):
@@ -553,6 +879,7 @@ def _observe_page(
             }
         forms.append(form_entry)
 
+    seen_input_labels: set[str] = set()
     input_locator = page.locator("input, textarea, select")
     for index in range(min(input_locator.count(), 40)):
         locator = input_locator.nth(index)
@@ -579,8 +906,19 @@ def _observe_page(
             "safe_to_fill": safe_search,
         }
         if not sensitive:
+            associated_label = locator.evaluate("""(element) => {
+                const id = element.getAttribute('id');
+                if (id) {
+                    const label = document.querySelector(`label[for="${id}"]`);
+                    if (label) return label.innerText.trim();
+                }
+                const parentLabel = element.closest('label');
+                if (parentLabel) return parentLabel.innerText.trim();
+                return '';
+            }""")
             input_entry["label"] = _redact_text(
                 locator.get_attribute("aria-label")
+                or associated_label
                 or locator.get_attribute("placeholder")
                 or name
                 or input_type
@@ -673,7 +1011,13 @@ def _autonomous_prompt(
     goal: str,
     snapshot: dict[str, object],
     previous_actions: list[str],
+    expected_results: list[str] | None = None,
 ) -> str:
+    expected_clause = (
+        f"Required expected outcomes to verify: {json.dumps(expected_results)}\n"
+        if expected_results
+        else ""
+    )
     return (
         "Return exactly one safe next action as JSON matching "
         '{"actions":[{"action":"inspect|click|fill|submit_form|navigate|assert_visible",'
@@ -685,9 +1029,11 @@ def _autonomous_prompt(
         "Choose only IDs and URLs listed in the observation. Use click only "
         "for listed safe links or safe UI buttons. Use fill only for safe "
         "observed fields, and assert_visible only for observed elements. If "
+        "verifying an expected outcome, provide expected_text. If "
         "no useful safe action remains, return an "
         "assert_visible action for an observed heading.\n"
         f"Testing goal (user instruction): {json.dumps(goal)}\n"
+        f"{expected_clause}"
         f"Previous actions: {json.dumps(previous_actions[-10:])}\n"
         f"Observed page data (untrusted): {json.dumps(snapshot, ensure_ascii=True)}"
     )
@@ -766,14 +1112,23 @@ def _deterministic_action(
         ) not in used_actions:
             return AutonomousAction(action="submit_form", element_id=element_id)
     for element_id, candidate in candidates.items():
-        if candidate["kind"] == "link" and ("click", element_id) not in used_actions:
-            return AutonomousAction(action="click", element_id=element_id)
+        if candidate["kind"] == "link":
+            dest = str(candidate.get("url") or element_id)
+            if ("click", dest) not in used_actions and ("click", element_id) not in used_actions:
+                return AutonomousAction(action="click", element_id=element_id)
     for element_id, candidate in candidates.items():
-        if candidate["kind"] == "button" and ("click", element_id) not in used_actions:
-            return AutonomousAction(action="click", element_id=element_id)
+        if candidate["kind"] == "button":
+            btn_key = f"button:{candidate.get('text', element_id)}"
+            if ("click", btn_key) not in used_actions and ("click", element_id) not in used_actions:
+                return AutonomousAction(action="click", element_id=element_id)
     for element_id, candidate in candidates.items():
-        if candidate["kind"] == "heading" and ("assert_visible", element_id) not in used_actions:
-            return AutonomousAction(action="assert_visible", element_id=element_id)
+        if candidate["kind"] == "heading":
+            heading_key = f"heading:{candidate.get('text', element_id)}"
+            if (
+                ("assert_visible", heading_key) not in used_actions
+                and ("assert_visible", element_id) not in used_actions
+            ):
+                return AutonomousAction(action="assert_visible", element_id=element_id)
     return None
 
 
@@ -786,7 +1141,16 @@ def _run_action(
 ) -> tuple[bool, str, str | None, str | None]:
     if action.action == "inspect_page":
         page.goto(target_url, wait_until="domcontentloaded")
-        controls = page.locator("button, a, input, select, textarea").count()
+        interactive_probe = (
+            "button, a, input, select, textarea, [role='button'], "
+            "div[role='button'], div[tabindex='0']"
+        )
+        if page.locator(interactive_probe).count() == 0:
+            try:
+                page.wait_for_selector(interactive_probe, state="visible", timeout=2000)
+            except Exception:
+                pass
+        controls = page.locator(interactive_probe).count()
         return (
             True,
             f"Loaded page '{page.title()}'; found {controls} interactive controls.",
@@ -893,6 +1257,10 @@ def execute_autonomous_website_run(
         previous_actions: list[str] = []
         page_reference: list[Page | None] = [None]
         step_limit_reached = False
+        required_outcomes: list[str] = list(run.expected_results or [])
+        if run.rejection_text and run.rejection_text.strip() and run.rejection_text not in required_outcomes:
+            required_outcomes.append(run.rejection_text.strip())
+        satisfied_outcomes: set[str] = set()
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
@@ -918,8 +1286,10 @@ def execute_autonomous_website_run(
                                 navigation_limit_hit = True
                                 route.abort("blockedbyclient")
                                 return
-                    if request_interceptor is not None and request_interceptor(route):
-                        return
+                    if request_interceptor is not None:
+                        handled = request_interceptor(route)
+                        if handled is not False:
+                            return
                     request_url = request.url
                     if request_url.startswith(("data:", "blob:")) and not request.is_navigation_request:
                         route.continue_()
@@ -929,6 +1299,7 @@ def execute_autonomous_website_run(
                             request_url,
                             target_host,
                             run.allowed_hosts,
+                            resolve_host=False,
                         )
                     except TargetValidationError:
                         if request.is_navigation_request:
@@ -946,8 +1317,18 @@ def execute_autonomous_website_run(
                 page = context.new_page()
                 page_reference[0] = page
                 page.set_default_timeout(_MAX_AUTONOMOUS_ACTION_MS)
+                page.set_default_navigation_timeout(_MAX_AUTONOMOUS_NAVIGATION_MS)
+                current_step: list[int | None] = [None]
+                collector = BrowserErrorCollector(
+                    run.id, cancel_event, lambda: current_step[0]
+                )
+                collector.attach_to_page(page)
 
-                for step_number in range(1, min(run.max_steps, _MAX_AUTONOMOUS_STEPS) + 1):
+                step_number = 0
+                max_allowed_steps = min(run.max_steps, _MAX_AUTONOMOUS_STEPS)
+                while step_number < max_allowed_steps:
+                    step_number += 1
+                    current_step[0] = step_number
                     if cancel_event.is_set():
                         break
                     remaining = deadline - time.monotonic()
@@ -971,7 +1352,12 @@ def execute_autonomous_website_run(
                         1,
                         min(_MAX_AUTONOMOUS_ACTION_MS, int(remaining * 1000)),
                     )
+                    nav_timeout_ms = max(
+                        1,
+                        min(_MAX_AUTONOMOUS_NAVIGATION_MS, int(remaining * 1000)),
+                    )
                     page.set_default_timeout(timeout_ms)
+                    page.set_default_navigation_timeout(nav_timeout_ms)
                     started = time.monotonic()
                     snapshot: dict[str, object] = {}
                     candidates: dict[str, dict[str, object]] = {}
@@ -993,6 +1379,7 @@ def execute_autonomous_website_run(
                                         run.goal,
                                         snapshot,
                                         previous_actions,
+                                        run.expected_results,
                                     ),
                                     min(_AI_PLAN_TIMEOUT_SECONDS, remaining),
                                 )
@@ -1012,6 +1399,12 @@ def execute_autonomous_website_run(
                                     candidates, used_actions
                                 )
                                 if action is None:
+                                    if len(previous_actions) <= 1:
+                                        database.add_execution_log(
+                                            run.id,
+                                            "diagnostic_finding",
+                                            "No safe actions were available on the target page for autonomous exploration.",
+                                        )
                                     database.add_execution_log(
                                         run.id,
                                         "exploration_complete",
@@ -1040,10 +1433,25 @@ def execute_autonomous_website_run(
                             1,
                             min(_MAX_AUTONOMOUS_ACTION_MS, int(remaining * 1000)),
                         )
+                        nav_timeout_ms = max(
+                            1,
+                            min(_MAX_AUTONOMOUS_NAVIGATION_MS, int(remaining * 1000)),
+                        )
                         page.set_default_timeout(timeout_ms)
+                        page.set_default_navigation_timeout(nav_timeout_ms)
                         assert action is not None
-                        action_key = action.url or action.element_id or action.action
-                        if (action.action, action_key) in used_actions:
+
+                        candidate = candidates.get(action.element_id or "")
+                        if action.action in {"click", "navigate"} and candidate and candidate.get("kind") == "link":
+                            action_key = str(candidate.get("url") or action.url or action.element_id)
+                        elif action.action == "click" and candidate and candidate.get("kind") == "button":
+                            action_key = f"button:{candidate.get('text', action.element_id)}"
+                        elif action.action == "assert_visible" and candidate and candidate.get("kind") == "heading":
+                            action_key = f"heading:{candidate.get('text', action.element_id)}"
+                        else:
+                            action_key = action.url or action.element_id or action.action
+
+                        if (action.action, action_key) in used_actions or (action.element_id and (action.action, action.element_id) in used_actions):
                             if not fallback_logged:
                                 database.add_execution_log(
                                     run.id,
@@ -1053,14 +1461,31 @@ def execute_autonomous_website_run(
                                 fallback_logged = True
                             action = _deterministic_action(candidates, used_actions)
                             if action is None:
+                                if len(previous_actions) <= 1:
+                                    database.add_execution_log(
+                                        run.id,
+                                        "diagnostic_finding",
+                                        "No safe actions were available on the target page for autonomous exploration.",
+                                    )
                                 database.add_execution_log(
                                     run.id,
                                     "exploration_complete",
                                     "No additional safe observed actions were available.",
                                 )
                                 break
-                            action_key = action.url or action.element_id or action.action
+                            candidate = candidates.get(action.element_id or "")
+                            if action.action in {"click", "navigate"} and candidate and candidate.get("kind") == "link":
+                                action_key = str(candidate.get("url") or action.url or action.element_id)
+                            elif action.action == "click" and candidate and candidate.get("kind") == "button":
+                                action_key = f"button:{candidate.get('text', action.element_id)}"
+                            elif action.action == "assert_visible" and candidate and candidate.get("kind") == "heading":
+                                action_key = f"heading:{candidate.get('text', action.element_id)}"
+                            else:
+                                action_key = action.url or action.element_id or action.action
+
                         used_actions.add((action.action, action_key))
+                        if action.element_id:
+                            used_actions.add((action.action, action.element_id))
                         previous_actions.append(
                             f"{action.action}:{action_key}"
                         )
@@ -1070,7 +1495,7 @@ def execute_autonomous_website_run(
                                 page.goto(
                                     run.target,
                                     wait_until="domcontentloaded",
-                                    timeout=timeout_ms,
+                                    timeout=nav_timeout_ms,
                                 )
                             snapshot, candidates = _observe_page(
                                 page,
@@ -1078,16 +1503,42 @@ def execute_autonomous_website_run(
                                 run.allowed_hosts,
                                 run.allow_form_submission,
                             )
+                            headings_count = len(snapshot.get("headings", []))
+                            links_count = len(snapshot.get("links", []))
+                            buttons_count = len(snapshot.get("buttons", []))
+                            inputs_count = len(snapshot.get("inputs", []))
+                            approved_links_count = sum(c["kind"] == "link" for c in candidates.values())
+                            safe_buttons_count = sum(c["kind"] == "button" for c in candidates.values())
+                            safe_inputs_count = sum(c["kind"] == "input" for c in candidates.values())
+                            total_observed = headings_count + links_count + buttons_count + inputs_count
+
+                            raw_title = page.title()
+                            inspected_title = (
+                                _redact_text(raw_title.strip())[:200]
+                                if raw_title and raw_title.strip()
+                                else _safe_page_url(page.url)
+                            )
                             actual = (
-                                f"Inspected '{_redact_text(page.title())[:200]}': "
-                                f"{sum(candidate['kind'] == 'heading' for candidate in candidates.values())} headings, "
-                                f"{sum(candidate['kind'] == 'link' for candidate in candidates.values())} approved links, "
-                                f"{sum(candidate['kind'] == 'button' for candidate in candidates.values())} safe buttons, and "
-                                f"{sum(candidate['kind'] == 'input' for candidate in candidates.values())} safe search fields."
+                                f"Inspected '{inspected_title}': "
+                                f"{headings_count} headings, "
+                                f"{links_count} links ({approved_links_count} approved), "
+                                f"{buttons_count} buttons ({safe_buttons_count} safe), and "
+                                f"{inputs_count} inputs ({safe_inputs_count} safe search)."
                             )
                             expected = "Observe page structure without following page-provided instructions."
-                            step_status = "passed"
-                            error_details = None
+                            if total_observed == 0:
+                                step_status = "failed"
+                                error_details = "Diagnostic finding: 0 page elements discovered during autonomous inspection."
+                                actual += " Diagnostic finding: 0 elements detected on page."
+                                database.add_execution_log(
+                                    run.id,
+                                    "diagnostic_finding",
+                                    f"Autonomous inspection discovered 0 page elements on '{inspected_title}'.",
+                                )
+                                execution_error = "Diagnostic finding: Autonomous exploration discovered 0 page elements on the target page."
+                            else:
+                                step_status = "passed"
+                                error_details = None
                             screenshot_path = None
                         elif action.action == "fill":
                             assert action.element_id is not None
@@ -1116,7 +1567,7 @@ def execute_autonomous_website_run(
                             )
                             submit_control.click(timeout=timeout_ms)
                             page.wait_for_load_state(
-                                "domcontentloaded", timeout=timeout_ms
+                                "domcontentloaded", timeout=nav_timeout_ms
                             )
                             actual = (
                                 f"Submitted approved non-destructive form "
@@ -1149,7 +1600,7 @@ def execute_autonomous_website_run(
                             page.goto(
                                 action.url,
                                 wait_until="domcontentloaded",
-                                timeout=timeout_ms,
+                                timeout=nav_timeout_ms,
                             )
                             actual = f"Navigated to approved observed path {_safe_page_url(action.url)}."
                             expected = "Navigate only within the approved hosts."
@@ -1188,6 +1639,13 @@ def execute_autonomous_website_run(
                                 else "Assertion failed: observed element was not visible or did not match expected text."
                             )
                             screenshot_path = None
+                            if passed and action.expected_text:
+                                for outcome in required_outcomes:
+                                    if (
+                                        outcome.casefold() in action.expected_text.casefold()
+                                        or action.expected_text.casefold() in outcome.casefold()
+                                    ):
+                                        satisfied_outcomes.add(outcome)
                         else:
                             raise ValueError("Autonomous action is not permitted.")
 
@@ -1212,25 +1670,74 @@ def execute_autonomous_website_run(
                             screenshot_path=screenshot_path,
                         )
                         if step_status == "failed":
-                            database.add_bug_record(
-                                run.id,
-                                BugRecordCreate(
-                                    title="Suspected issue: autonomous visibility assertion failed",
-                                    description=(
-                                        "Autonomous exploration did not observe the configured "
-                                        "page element or expected text."
+                            if action.action == "inspect":
+                                database.add_bug_record(
+                                    run.id,
+                                    BugRecordCreate(
+                                        title="Suspected issue: autonomous inspection found zero page elements",
+                                        description=(
+                                            "Autonomous exploration could not discover any visible page "
+                                            "elements (headings, links, buttons, inputs, or forms) on the page."
+                                        ),
+                                        severity="High",
+                                        confidence=0.8,
+                                        reproduction_steps=[
+                                            f"Navigate to {run.target}.",
+                                            "Observe page structure for interactive and semantic elements.",
+                                        ],
+                                        expected_result=_redact_text(expected),
+                                        actual_result=_redact_text(actual),
+                                        evidence_path=screenshot_path,
                                     ),
-                                    severity="Medium",
-                                    confidence=0.5,
-                                    reproduction_steps=[
-                                        f"Explore {run.target} toward the configured goal.",
-                                        f"Check observed element {action.element_id}.",
-                                    ],
-                                    expected_result=_redact_text(expected),
-                                    actual_result=_redact_text(actual),
-                                    evidence_path=screenshot_path,
-                                ),
-                            )
+                                )
+                            else:
+                                database.add_bug_record(
+                                    run.id,
+                                    BugRecordCreate(
+                                        title="Suspected issue: autonomous visibility assertion failed",
+                                        description=(
+                                            "Autonomous exploration did not observe the configured "
+                                            "page element or expected text."
+                                        ),
+                                        severity="Medium",
+                                        confidence=0.5,
+                                        reproduction_steps=[
+                                            f"Explore {run.target} toward the configured goal.",
+                                            f"Check observed element {action.element_id or 'unknown'}.",
+                                        ],
+                                        expected_result=_redact_text(expected),
+                                        actual_result=_redact_text(actual),
+                                        evidence_path=screenshot_path,
+                                    ),
+                                )
+                        if execution_error:
+                            break
+
+                        if required_outcomes and page.url != "about:blank":
+                            for outcome in list(required_outcomes):
+                                if outcome in satisfied_outcomes:
+                                    continue
+                                found, snippet = _check_expected_outcome_on_page(
+                                    page, outcome, run.rejection_selector
+                                )
+                                if found and step_number < max_allowed_steps:
+                                    satisfied_outcomes.add(outcome)
+                                    outcome_started = time.monotonic()
+                                    step_number += 1
+                                    outcome_screenshot = _capture_autonomous_evidence(
+                                        run.id, page, evidence_directory, step_number
+                                    )
+                                    _record_step(
+                                        run.id,
+                                        step_number,
+                                        "autonomous:assert_outcome",
+                                        page,
+                                        f"Expected outcome: {outcome}",
+                                        f"Verified expected outcome on page: '{snippet}'.",
+                                        "passed",
+                                        outcome_started,
+                                        screenshot_path=outcome_screenshot,
+                                    )
                     except TargetValidationError as error:
                         execution_error = (
                             "Unsafe navigation was blocked by the host or navigation policy."
@@ -1262,6 +1769,9 @@ def execute_autonomous_website_run(
                             category = "safety_blocked"
                         elif type(error).__module__.startswith("playwright"):
                             category = "browser_error"
+                            execution_error = (
+                                f"Website action failed ({type(error).__name__})."
+                            )
                         else:
                             category = "infrastructure_error"
                             execution_error = (
@@ -1297,7 +1807,7 @@ def execute_autonomous_website_run(
 
                     if time.monotonic() >= deadline:
                         execution_error = "Autonomous exploration reached its runtime limit."
-                        if step_number < min(run.max_steps, _MAX_AUTONOMOUS_STEPS):
+                        if step_number < max_allowed_steps:
                             timeout_started = time.monotonic()
                             _record_step(
                                 run.id,
@@ -1318,14 +1828,12 @@ def execute_autonomous_website_run(
                             )
                         break
 
-                else:
+                if step_number >= max_allowed_steps and not execution_error and not cancel_event.is_set():
                     step_limit_reached = True
-
-                if step_limit_reached:
                     database.add_execution_log(
                         run.id,
                         "step_limit",
-                        f"Autonomous exploration stopped after {min(run.max_steps, _MAX_AUTONOMOUS_STEPS)} steps.",
+                        f"Autonomous exploration stopped after {max_allowed_steps} steps.",
                     )
                 context.close()
             finally:
@@ -1419,15 +1927,28 @@ def execute_website_run(
             return
         actions = build_login_action_plan(run)
         target_host = target_validator(run.target, None)
+        validate_run_target_url(run.target, target_host, run.allowed_hosts)
         _, parsed_host, target_port = _validate_url_parts(run.target)
         try:
             target_ip = ipaddress.ip_address(parsed_host)
+            target_addresses = {target_ip}
         except ValueError:
             target_addresses = _resolve_public_addresses(parsed_host, target_port)
             target_ip = sorted(target_addresses, key=lambda address: address.version)[0]
-        resolver_address = (
-            f"[{target_ip}]" if target_ip.version == 6 else str(target_ip)
-        )
+        resolver_rules: list[str] = []
+        resolved_hosts = {parsed_host: target_addresses}
+        for allowed_host in run.allowed_hosts:
+            if allowed_host not in resolved_hosts:
+                try:
+                    resolved_hosts[allowed_host] = _resolve_public_addresses(
+                        allowed_host, 443
+                    )
+                except Exception:
+                    pass
+        for host, addresses in resolved_hosts.items():
+            address = sorted(addresses, key=lambda item: item.version)[0]
+            rendered = f"[{address}]" if address.version == 6 else str(address)
+            resolver_rules.append(f"MAP {host} {rendered}")
         deadline = time.monotonic() + run.max_duration_seconds
         evidence_directory = EVIDENCE_DIR / run.id
 
@@ -1435,9 +1956,7 @@ def execute_website_run(
             browser: Browser = playwright.chromium.launch(
                 headless=True,
                 timeout=min(30000, run.max_duration_seconds * 1000),
-                args=[
-                    f"--host-resolver-rules=MAP {target_host} {resolver_address}"
-                ],
+                args=[f"--host-resolver-rules={', '.join(resolver_rules)}"],
             )
             try:
                 context = browser.new_context(service_workers="block")
@@ -1450,7 +1969,26 @@ def execute_website_run(
                         route.continue_()
                         return
                     try:
-                        target_validator(request_url, target_host)
+                        if target_validator is validate_target_url:
+                            validate_run_target_url(
+                                request_url,
+                                target_host,
+                                run.allowed_hosts,
+                                resolve_host=False,
+                            )
+                        else:
+                            try:
+                                target_validator(request_url, target_host)
+                            except TargetValidationError:
+                                if run.allowed_hosts:
+                                    validate_run_target_url(
+                                        request_url,
+                                        target_host,
+                                        run.allowed_hosts,
+                                        resolve_host=False,
+                                    )
+                                else:
+                                    raise
                     except TargetValidationError:
                         route.abort("blockedbyclient")
                         return
@@ -1459,9 +1997,15 @@ def execute_website_run(
                 context.route("**/*", guard_request)
                 page = context.new_page()
                 page.set_default_timeout(min(10000, run.max_duration_seconds * 1000))
+                current_step: list[int | None] = [None]
+                collector = BrowserErrorCollector(
+                    run.id, cancel_event, lambda: current_step[0]
+                )
+                collector.attach_to_page(page)
                 execution_error: str | None = None
 
                 for step_number, action in enumerate(actions, start=1):
+                    current_step[0] = step_number
                     if cancel_event.is_set():
                         break
                     remaining_seconds = deadline - time.monotonic()

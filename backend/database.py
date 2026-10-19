@@ -8,7 +8,11 @@ from typing import Generator
 from uuid import uuid4
 
 from backend.schemas import (
+    AIBugReport,
+    AIBugReportCreate,
     AssertionResult,
+    BrowserError,
+    BrowserErrorCreate,
     ExecutionError,
     BugRecord,
     BugRecordCreate,
@@ -26,12 +30,14 @@ _ASSERTION_ACTIONS = {
     "check_visibility",
     "verify_authentication",
     "autonomous:assert_visible",
+    "autonomous:assert_outcome",
 }
 _EXECUTION_ERROR_EVENTS: dict[str, ExecutionError] = {
     "browser_error": "browser",
     "safety_blocked": "safety",
     "runtime_limit": "timeout",
     "infrastructure_error": "infrastructure",
+    "diagnostic_finding": "browser",
 }
 
 
@@ -118,6 +124,36 @@ CREATE INDEX IF NOT EXISTS idx_bug_records_run_id
     ON bug_records(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_execution_logs_run_id
     ON execution_logs(run_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS ai_bug_reports (
+    id TEXT PRIMARY KEY,
+    run_id TEXT REFERENCES test_runs(id) ON DELETE SET NULL,
+    observation TEXT NOT NULL,
+    title TEXT NOT NULL,
+    report_markdown TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_bug_reports_created_at
+    ON ai_bug_reports(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_bug_reports_run_id
+    ON ai_bug_reports(run_id);
+
+CREATE TABLE IF NOT EXISTS browser_errors (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+    step_number INTEGER,
+    category TEXT NOT NULL CHECK (category IN ('page_error', 'console_error', 'http_error', 'request_failed')),
+    message TEXT NOT NULL,
+    url TEXT,
+    http_status INTEGER CHECK (http_status IS NULL OR (http_status BETWEEN 100 AND 599)),
+    resource_type TEXT,
+    timestamp TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_browser_errors_run_id
+    ON browser_errors(run_id, timestamp);
 """
 
 _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
@@ -224,10 +260,20 @@ def _derived_result_fields(
     status: str,
     error_details: str | None,
 ) -> dict[str, object]:
-    assertion_rows = connection.execute(
+    run_row = connection.execute(
         """
-        SELECT status FROM test_steps
-        WHERE run_id = ? AND action IN (?, ?, ?)
+        SELECT mode, goal, expected_results, rejection_text, rejection_selector
+        FROM test_runs
+        WHERE id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    placeholders = ", ".join("?" for _ in _ASSERTION_ACTIONS)
+    assertion_rows = connection.execute(
+        f"""
+        SELECT status, action, expected_result, actual_result FROM test_steps
+        WHERE run_id = ? AND action IN ({placeholders})
         """,
         (run_id, *_ASSERTION_ACTIONS),
     ).fetchall()
@@ -241,7 +287,57 @@ def _derived_result_fields(
     if "failed" in assertion_statuses:
         assertion_result: AssertionResult = "failed"
     elif assertion_statuses and assertion_statuses <= {"passed"}:
-        assertion_result = "passed"
+        is_autonomous = bool(
+            run_row and run_row["mode"] in ("autonomous-exploration", "autonomous")
+        )
+        if not is_autonomous:
+            assertion_result = "passed"
+        else:
+            required_outcomes: list[str] = []
+            if run_row and run_row["expected_results"]:
+                try:
+                    parsed_expected = json.loads(run_row["expected_results"])
+                    if isinstance(parsed_expected, list):
+                        required_outcomes.extend(
+                            [str(item).strip() for item in parsed_expected if str(item).strip()]
+                        )
+                except Exception:
+                    pass
+            if run_row and run_row["rejection_text"] and run_row["rejection_text"].strip():
+                rejection = run_row["rejection_text"].strip()
+                if rejection not in required_outcomes:
+                    required_outcomes.append(rejection)
+
+            if required_outcomes:
+                all_evaluated = True
+                for req in required_outcomes:
+                    req_lower = req.casefold()
+                    evaluated = False
+                    for row in assertion_rows:
+                        if row["status"] != "passed":
+                            continue
+                        exp = (row["expected_result"] or "").casefold()
+                        act = (row["actual_result"] or "").casefold()
+                        if req_lower in exp or req_lower in act:
+                            evaluated = True
+                            break
+                    if not evaluated:
+                        all_evaluated = False
+                        break
+                assertion_result = "passed" if all_evaluated else "not_evaluated"
+            else:
+                meaningful_pass = False
+                for row in assertion_rows:
+                    if row["status"] == "passed":
+                        if row["action"] == "autonomous:assert_outcome":
+                            meaningful_pass = True
+                            break
+                        if row["action"] == "autonomous:assert_visible":
+                            exp = row["expected_result"] or ""
+                            if " containing " in exp:
+                                meaningful_pass = True
+                                break
+                assertion_result = "passed" if meaningful_pass else "not_evaluated"
     else:
         assertion_result = "not_evaluated"
 
@@ -267,6 +363,8 @@ def _derived_result_fields(
             execution_error = "timeout"
         elif "unsafe" in error_details.casefold() or "navigation" in error_details.casefold():
             execution_error = "safety"
+        elif "diagnostic" in error_details.casefold() or "elements" in error_details.casefold():
+            execution_error = "browser"
         else:
             execution_error = "infrastructure"
 
@@ -289,13 +387,14 @@ def get_dashboard_metrics(
                 "SELECT status, COUNT(*) AS count FROM test_runs GROUP BY status"
             )
         }
+        placeholders = ", ".join("?" for _ in _ASSERTION_ACTIONS)
         assertion_counts = connection.execute(
-            """
+            f"""
             SELECT
                 SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) AS passed,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
             FROM test_steps
-            WHERE action IN (?, ?, ?)
+            WHERE action IN ({placeholders})
             """,
             tuple(_ASSERTION_ACTIONS),
         ).fetchone()
@@ -795,6 +894,22 @@ def get_test_run_report_data(
             """,
             (run_id,),
         ).fetchall()
+        browser_rows = connection.execute(
+            """
+            SELECT * FROM browser_errors
+            WHERE run_id = ?
+            ORDER BY timestamp, id
+            """,
+            (run_id,),
+        ).fetchall()
+        ai_report_rows = connection.execute(
+            """
+            SELECT * FROM ai_bug_reports
+            WHERE run_id = ?
+            ORDER BY created_at DESC
+            """,
+            (run_id,),
+        ).fetchall()
         derived = _derived_result_fields(
             connection,
             run_id,
@@ -807,6 +922,16 @@ def get_test_run_report_data(
         "steps": [_test_step_from_row(row) for row in step_rows],
         "bugs": [_bug_record_from_row(row) for row in bug_rows],
         "logs": [ExecutionLog.model_validate(dict(row)) for row in log_rows],
+        "browser_errors": [
+            _browser_error_from_row(row)
+            for row in browser_rows
+            if row is not None
+        ],
+        "ai_bug_reports": [
+            _ai_bug_report_from_row(row)
+            for row in ai_report_rows
+            if row is not None
+        ],
     }
 
 
@@ -822,3 +947,191 @@ def get_test_step_screenshot(
             (run_id, step_number),
         ).fetchone()
     return row["screenshot_path"] if row is not None else None
+
+
+def extract_bug_title(report_markdown: str, observation: str) -> str:
+    lines = [line.strip() for line in report_markdown.splitlines()]
+    for i, line in enumerate(lines):
+        if line.lower() in {"## bug title", "## failure summary"} and i + 1 < len(lines):
+            for candidate in lines[i + 1:]:
+                if candidate and not candidate.startswith("#"):
+                    return candidate[:120]
+                if candidate.startswith("#"):
+                    break
+    cleaned = " ".join(observation.split())
+    if len(cleaned) <= 80:
+        return cleaned or "Untitled Bug Report"
+    return cleaned[:77] + "..."
+
+
+def _ai_bug_report_from_row(row: sqlite3.Row | None) -> AIBugReport | None:
+    if row is None:
+        return None
+    values = dict(row)
+    if isinstance(values.get("created_at"), str):
+        values["created_at"] = datetime.fromisoformat(values["created_at"])
+    return AIBugReport.model_validate(values)
+
+
+def create_ai_bug_report(
+    observation: str,
+    report_markdown: str,
+    *,
+    run_id: str | None = None,
+    model: str = "gemini-1.5-flash",
+    title: str | None = None,
+    database_path: str | Path | None = None,
+) -> AIBugReport:
+    report_id = str(uuid4())
+    now = _utc_now()
+    resolved_title = (
+        title.strip()
+        if title and title.strip()
+        else extract_bug_title(report_markdown, observation)
+    )
+
+    with _connection(database_path) as connection:
+        if run_id is not None:
+            run_row = connection.execute(
+                "SELECT id FROM test_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"Test run '{run_id}' not found.")
+
+        connection.execute(
+            """
+            INSERT INTO ai_bug_reports (
+                id, run_id, observation, title, report_markdown, model, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                run_id,
+                observation,
+                resolved_title,
+                report_markdown,
+                model,
+                now.isoformat(),
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM ai_bug_reports WHERE id = ?", (report_id,)
+        ).fetchone()
+
+    report = _ai_bug_report_from_row(row)
+    if report is None:
+        raise RuntimeError("Failed to retrieve created AI bug report.")
+    return report
+
+
+def get_ai_bug_report(
+    report_id: str,
+    database_path: str | Path | None = None,
+) -> AIBugReport | None:
+    with _connection(database_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM ai_bug_reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        return _ai_bug_report_from_row(row)
+
+
+def list_ai_bug_reports(
+    *,
+    run_id: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+    database_path: str | Path | None = None,
+) -> tuple[list[AIBugReport], int]:
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    with _connection(database_path) as connection:
+        if run_id is not None:
+            count_query = "SELECT count(id) FROM ai_bug_reports WHERE run_id = ?"
+            items_query = """
+                SELECT * FROM ai_bug_reports
+                WHERE run_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            params: tuple[object, ...] = (run_id,)
+            item_params = (run_id, limit, offset)
+        else:
+            count_query = "SELECT count(id) FROM ai_bug_reports"
+            items_query = """
+                SELECT * FROM ai_bug_reports
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            params = ()
+            item_params = (limit, offset)
+
+        total = connection.execute(count_query, params).fetchone()[0]
+        rows = connection.execute(items_query, item_params).fetchall()
+        items = [_ai_bug_report_from_row(row) for row in rows if row is not None]
+        return [item for item in items if item is not None], total
+
+
+def _browser_error_from_row(row: sqlite3.Row | None) -> BrowserError | None:
+    if row is None:
+        return None
+    values = dict(row)
+    if isinstance(values.get("timestamp"), str):
+        values["timestamp"] = datetime.fromisoformat(values["timestamp"])
+    return BrowserError.model_validate(values)
+
+
+def add_browser_error(
+    run_id: str,
+    error: BrowserErrorCreate,
+    database_path: str | Path | None = None,
+) -> BrowserError:
+    error_id = str(uuid4())
+    now = error.timestamp or _utc_now()
+    with _connection(database_path) as connection:
+        run_row = connection.execute(
+            "SELECT id FROM test_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if run_row is None:
+            raise ValueError(f"Test run '{run_id}' not found.")
+        connection.execute(
+            """
+            INSERT INTO browser_errors (
+                id, run_id, step_number, category, message, url, http_status, resource_type, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                error_id,
+                run_id,
+                error.step_number,
+                error.category,
+                error.message,
+                error.url,
+                error.http_status,
+                error.resource_type,
+                now.isoformat(),
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM browser_errors WHERE id = ?", (error_id,)
+        ).fetchone()
+    persisted = _browser_error_from_row(row)
+    if persisted is None:
+        raise RuntimeError("Failed to retrieve recorded browser error.")
+    return persisted
+
+
+def list_browser_errors(
+    run_id: str,
+    database_path: str | Path | None = None,
+) -> list[BrowserError]:
+    with _connection(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM browser_errors
+            WHERE run_id = ?
+            ORDER BY timestamp, id
+            """,
+            (run_id,),
+        ).fetchall()
+        items = [_browser_error_from_row(row) for row in rows]
+        return [item for item in items if item is not None]

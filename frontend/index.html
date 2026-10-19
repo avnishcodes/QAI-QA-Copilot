@@ -3,20 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#10182b">
-    <title>QAI — QA Copilot</title>
+    <meta name="theme-color" content="#1e2638">
+    <title>QA Copilot — AI-Powered Quality Assurance</title>
+    <link rel="icon" type="image/png" href="assets/qa-copilot-logo.png">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="app-shell">
-        <aside class="sidebar" aria-label="Main navigation">
-            <a class="brand" href="#" data-page="overview" aria-label="QAI overview">
-                <span class="brand-mark" aria-hidden="true">Q</span>
-                <span class="brand-copy"><strong>QAI Copilot</strong><small>Quality workspace</small></span>
-            </a>
+        <header class="topbar">
+            <div class="topbar-brand-section">
+                <a class="brand" href="#" data-page="overview" aria-label="QA Copilot overview">
+                    <img class="brand-logo" src="assets/qa-copilot-logo.png" alt="QA Copilot logo" width="36" height="36">
+                    <span class="brand-copy"><strong>QA Copilot</strong><small>AI-Powered Quality Assurance</small></span>
+                </a>
+                <div class="topbar-divider" aria-hidden="true"></div>
+                <div class="topbar-title-block">
+                    <div class="eyebrow">QA AUTOMATION WORKSPACE</div>
+                    <h1 id="pageTitle">Overview</h1>
+                </div>
+            </div>
 
-            <div class="sidebar-label">WORKSPACE</div>
-            <nav class="primary-nav">
+            <nav class="primary-nav" aria-label="Main navigation">
                 <button class="nav-item active" type="button" data-page="overview" aria-current="page">
                     <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"></path></svg><span>Overview</span>
                 </button>
@@ -34,42 +41,19 @@
                 </button>
             </nav>
 
-            <div class="sidebar-footer">
-                <span class="sidebar-footer-mark" aria-hidden="true">✓</span>
-                <span><strong>Testing, with guardrails</strong><small>Runs are bounded and recorded</small></span>
+            <div class="topbar-actions">
+                <div id="backendStatus" class="connection-status" data-status="checking" role="status">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span id="backendStatusText">Checking backend</span>
+                </div>
             </div>
-        </aside>
+        </header>
 
         <div class="workspace">
-            <header class="topbar">
-                <div>
-                    <div class="eyebrow">QA AUTOMATION WORKSPACE</div>
-                    <h1 id="pageTitle">Overview</h1>
-                </div>
-                <div class="topbar-actions">
-                    <div id="backendStatus" class="connection-status" data-status="checking" role="status">
-                        <span class="status-dot" aria-hidden="true"></span>
-                        <span id="backendStatusText">Checking backend</span>
-                    </div>
-                    <button id="refreshDashboardBtn" class="icon-button" type="button" aria-label="Refresh dashboard and history" title="Refresh">
-                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"></path></svg><span class="refresh-label">Refresh</span>
-                    </button>
-                    <div class="avatar" aria-label="QAI workspace">QA</div>
-                </div>
-            </header>
 
             <main class="page-content">
                 <section id="overviewSection" class="page-panel active" data-page-panel="overview">
                     <div class="overview-dashboard">
-                        <div class="page-intro">
-                            <div>
-                                <p class="eyebrow">PROJECT SNAPSHOT</p>
-                                <h2>Your testing at a glance</h2>
-                                <p class="muted">Live metrics from saved execution history.</p>
-                            </div>
-                            <button class="primary-button compact-button" type="button" data-page="new-run"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg> Start a test run</button>
-                        </div>
-
                         <p id="overviewStatusMessage" class="history-message" role="status" aria-live="polite"></p>
                         <div class="stats-grid" aria-label="Execution summary">
                             <article class="stat-card">
@@ -129,20 +113,46 @@
                         <div class="section-heading">
                             <div>
                                 <p class="eyebrow">AI-ASSISTED TRIAGE</p>
-                                <h2>Describe a bug</h2>
-                                <p class="muted">Turn a tester observation into a structured QA report.</p>
+                                <h2>AI Bug Analysis Workspace</h2>
+                                <p class="muted">Turn a tester observation into a structured QA report with persistent history.</p>
                             </div>
                             <span class="ai-chip"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12M12 8v8m-4-4h8"></path></svg> Gemini</span>
                         </div>
-                        <label class="field-label" for="bugInput">Tester observation</label>
-                        <textarea id="bugInput" class="bug-input" placeholder="Example: When I upload a profile picture and crop it, the image is not updated on my profile."></textarea>
-                        <div class="analysis-actions">
-                            <span class="field-hint">Do not include passwords, tokens, or other secrets.</span>
-                            <button id="analyzeBtn" class="primary-button" type="button">Analyze bug <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"></path></svg></button>
-                        </div>
-                        <div id="loading" class="loading hidden" role="status">Analyzing bug with AI…</div>
-                        <div id="result" class="result" aria-live="polite">
-                            <p class="placeholder">Your AI-generated QA report will appear here.</p>
+                        <div class="analysis-layout">
+                            <div class="analysis-form-column">
+                                <label class="field-label" for="bugInput">Tester observation</label>
+                                <textarea id="bugInput" class="bug-input" placeholder="Example: When I upload a profile picture and crop it, the image is not updated on my profile."></textarea>
+                                <div class="analysis-actions">
+                                    <span class="field-hint">Do not include passwords, tokens, or other secrets.</span>
+                                    <div class="analysis-button-group">
+                                        <button id="newAnalysisBtn" class="secondary-button compact-button" type="button">New</button>
+                                        <button id="analyzeBtn" class="primary-button" type="button">Analyze bug <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"></path></svg></button>
+                                    </div>
+                                </div>
+                                <div id="loading" class="loading hidden" role="status">Analyzing bug with AI…</div>
+                                <div class="report-toolbar">
+                                    <span id="activeReportMeta" class="report-meta"></span>
+                                    <button id="copyReportBtn" class="secondary-button compact-button hidden" type="button" title="Copy report markdown to clipboard">
+                                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+                                        <span id="copyBtnText">Copy Markdown</span>
+                                    </button>
+                                </div>
+                                <div id="result" class="result" aria-live="polite">
+                                    <p class="placeholder">Your AI-generated QA report will appear here.</p>
+                                </div>
+                            </div>
+                            <aside class="saved-analyses-column" aria-label="Saved analyses">
+                                <div class="saved-analyses-header">
+                                    <h4>Saved Analyses</h4>
+                                    <button id="refreshSavedAnalysesBtn" class="icon-button" type="button" aria-label="Refresh saved analyses" title="Refresh saved analyses">
+                                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"></path></svg>
+                                    </button>
+                                </div>
+                                <p id="savedAnalysesStatus" class="saved-analyses-status" aria-live="polite"></p>
+                                <ul id="savedAnalysesList" class="saved-analyses-list">
+                                    <li class="saved-analysis-empty">Loading saved analyses…</li>
+                                </ul>
+                            </aside>
                         </div>
                     </section>
                 </section>
@@ -203,14 +213,14 @@
                             <div class="form-group login-settings">
                                 <div class="form-section-heading"><span class="step-number">04</span><div><h3>Login check settings</h3><p>CSS selectors and synthetic credentials are used only for the configured login mode.</p></div></div>
                                 <div class="field-grid">
-                                    <label class="login-only-field">Username field CSS selector<input id="loginUsernameSelector" type="text" maxlength="500" required placeholder="#username"></label>
-                                    <label class="login-only-field">Password field CSS selector<input id="loginPasswordSelector" type="text" maxlength="500" required placeholder="#password"></label>
-                                    <label class="login-only-field">Submit control CSS selector<input id="loginSubmitSelector" type="text" maxlength="500" required placeholder="button[type='submit']"></label>
-                                    <label class="login-only-field">Rejection indicator CSS selector<input id="rejectionSelector" type="text" maxlength="500" required placeholder=".error-message"></label>
+                                    <label class="login-only-field">Username field CSS selector<input id="loginUsernameSelector" type="text" maxlength="500" placeholder="#username"></label>
+                                    <label class="login-only-field">Password field CSS selector<input id="loginPasswordSelector" type="text" maxlength="500" placeholder="#password"></label>
+                                    <label class="login-only-field">Submit control CSS selector<input id="loginSubmitSelector" type="text" maxlength="500" placeholder="button[type='submit']"></label>
+                                    <label class="login-only-field">Rejection indicator CSS selector<input id="rejectionSelector" type="text" maxlength="500" placeholder=".error-message"></label>
                                     <label class="login-only-field">Expected rejection text <span class="optional-label">Optional</span><input id="rejectionText" type="text" maxlength="1000" placeholder="Invalid username or password"></label>
                                     <label class="login-only-field">Authenticated-state CSS selector <span class="optional-label">Optional</span><input id="authenticatedSelector" type="text" maxlength="500" placeholder=".account-menu"></label>
-                                    <label class="login-only-field">Synthetic test username<input id="testUsername" type="text" maxlength="320" value="qai-invalid-user@example.invalid" required></label>
-                                    <label class="login-only-field">Synthetic test password<input id="testPassword" type="password" maxlength="1024" value="QAI-invalid-password-not-a-real-secret" required autocomplete="new-password"></label>
+                                    <label class="login-only-field">Synthetic test username<input id="testUsername" type="text" maxlength="320" value="qai-invalid-user@example.invalid" placeholder="e.g. 9876543210 or user@example.invalid"></label>
+                                    <label class="login-only-field">Synthetic test password<input id="testPassword" type="password" maxlength="1024" value="QAI-invalid-password-not-a-real-secret" autocomplete="new-password"></label>
                                 </div>
                             </div>
 

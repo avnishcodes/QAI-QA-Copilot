@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.staging.example
 !.env.example
 backend/.env
 backend/.qai-api-token

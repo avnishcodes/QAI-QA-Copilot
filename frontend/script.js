@@ -4,6 +4,16 @@ const analyzeBtn = document.getElementById("analyzeBtn");
 const bugInput = document.getElementById("bugInput");
 const result = document.getElementById("result");
 const loading = document.getElementById("loading");
+const newAnalysisBtn = document.getElementById("newAnalysisBtn");
+const activeReportMeta = document.getElementById("activeReportMeta");
+const copyReportBtn = document.getElementById("copyReportBtn");
+const copyBtnText = document.getElementById("copyBtnText");
+const refreshSavedAnalysesBtn = document.getElementById("refreshSavedAnalysesBtn");
+const savedAnalysesStatus = document.getElementById("savedAnalysesStatus");
+const savedAnalysesList = document.getElementById("savedAnalysesList");
+
+let currentActiveReportMarkdown = "";
+let currentActiveReportId = null;
 const websiteRunForm = document.getElementById("websiteRunForm");
 const runStatus = document.getElementById("runStatus");
 const runSteps = document.getElementById("runSteps");
@@ -58,18 +68,80 @@ function setActivePage(page) {
     }
     document.getElementById("pageTitle").textContent = pageTitles[page] || pageTitles.overview;
     if (page === "analysis") {
+        loadSavedAnalyses();
         document.getElementById("bugAnalysisCard").scrollIntoView({ block: "start", behavior: "smooth" });
         bugInput.focus({ preventScroll: true });
     }
+    if (page === "new-run") updateRunModeFields();
     if (page === "history") loadExecutionHistory();
     if (page === "overview") loadDashboardSummary();
 }
 
-async function requestJson(path, options) {
-    const response = await fetch(`${API_BASE}${path}`, { credentials: "same-origin", ...options });
-    const data = await response.json();
+function formatApiErrorMessage(data, status) {
+    if (!data) return `Request failed with status ${status}.`;
+    if (typeof data.detail === "string" && data.detail.trim()) {
+        return data.detail.trim();
+    }
+    if (Array.isArray(data.detail)) {
+        const parts = data.detail
+            .map((err) => {
+                if (typeof err === "string") return err;
+                if (err && typeof err === "object") {
+                    const loc = Array.isArray(err.loc)
+                        ? err.loc.filter((p) => p !== "body").join(".")
+                        : "";
+                    const msg = err.msg || err.message || "";
+                    return loc && msg ? `${loc}: ${msg}` : (msg || JSON.stringify(err));
+                }
+                return String(err);
+            })
+            .filter(Boolean);
+        if (parts.length) return parts.join("; ");
+    } else if (data.detail && typeof data.detail === "object") {
+        const msg = data.detail.msg || data.detail.message || data.detail.error;
+        if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+    if (typeof data.error === "string" && data.error.trim()) {
+        return data.error.trim();
+    }
+    if (typeof data.message === "string" && data.message.trim()) {
+        return data.message.trim();
+    }
+    return `Request failed with status ${status}.`;
+}
+
+async function requestJson(path, options = {}) {
+    const fetchOptions = { credentials: "same-origin", ...options };
+    const headers = new Headers(options.headers || {});
+    if (options.body && typeof options.body === "string" && !headers.has("Content-Type")) {
+        headers.set("Content-Type", "application/json");
+    }
+    fetchOptions.headers = headers;
+
+    const response = await fetch(`${API_BASE}${path}`, fetchOptions);
+    const contentType = response.headers.get("content-type") || "";
+    let data = null;
+    if (contentType.includes("application/json")) {
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
+    }
     if (!response.ok) {
-        throw new Error(data.detail || data.error || `Request failed with status ${response.status}.`);
+        let message = formatApiErrorMessage(data, response.status);
+        if (!data) {
+            try {
+                const text = (await response.text()).trim();
+                if (text) message = text.slice(0, 300);
+            } catch {
+                // Keep default message
+            }
+        }
+        throw new Error(message);
+    }
+    if (data === null) {
+        data = await response.json();
     }
     return data;
 }
@@ -88,6 +160,135 @@ function setResultMessage(message, className) {
     paragraph.textContent = message;
     result.replaceChildren(paragraph);
 }
+
+async function loadSavedAnalyses() {
+    if (!savedAnalysesList) return;
+    try {
+        if (savedAnalysesStatus) savedAnalysesStatus.textContent = "Loading saved analyses…";
+        const data = await requestJson("/ai-bug-reports?limit=20");
+        if (savedAnalysesStatus) savedAnalysesStatus.textContent = "";
+        renderSavedAnalyses(data.items || []);
+    } catch (error) {
+        console.error("Failed to load saved analyses:", error);
+        if (savedAnalysesStatus) savedAnalysesStatus.textContent = "Could not load saved analyses.";
+    }
+}
+
+function renderSavedAnalyses(items) {
+    if (!savedAnalysesList) return;
+    savedAnalysesList.replaceChildren();
+    if (!items.length) {
+        const empty = document.createElement("li");
+        empty.className = "saved-analysis-empty";
+        empty.textContent = "No saved analyses yet. Generated reports will be stored here.";
+        savedAnalysesList.append(empty);
+        return;
+    }
+
+    for (const item of items) {
+        const li = document.createElement("li");
+        li.className = "saved-analysis-item";
+        li.dataset.reportId = item.id;
+        if (item.id === currentActiveReportId) {
+            li.classList.add("active");
+        }
+
+        const titleDiv = document.createElement("div");
+        titleDiv.className = "saved-analysis-title";
+        titleDiv.textContent = item.title || "Untitled Bug Report";
+
+        const metaDiv = document.createElement("div");
+        metaDiv.className = "saved-analysis-meta";
+        const dateSpan = document.createElement("span");
+        const dateObj = new Date(item.created_at);
+        dateSpan.textContent = isNaN(dateObj.getTime())
+            ? item.created_at
+            : dateObj.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        metaDiv.append(dateSpan);
+
+        if (item.run_id) {
+            const runSpan = document.createElement("span");
+            runSpan.className = "status-badge";
+            runSpan.textContent = "Linked Run";
+            metaDiv.append(runSpan);
+        }
+
+        li.append(titleDiv, metaDiv);
+        li.addEventListener("click", () => {
+            selectSavedAnalysis(item);
+        });
+        savedAnalysesList.append(li);
+    }
+}
+
+function selectSavedAnalysis(item) {
+    currentActiveReportId = item.id;
+    currentActiveReportMarkdown = item.report_markdown || "";
+
+    bugInput.value = item.observation || "";
+    result.replaceChildren(formatReport(item.report_markdown));
+
+    if (activeReportMeta) {
+        activeReportMeta.replaceChildren();
+        const dateObj = new Date(item.created_at);
+        const formattedDate = isNaN(dateObj.getTime()) ? item.created_at : dateObj.toLocaleString();
+        const metaText = document.createElement("span");
+        metaText.textContent = `Saved: ${formattedDate} (${item.model || "gemini"})`;
+        activeReportMeta.append(metaText);
+        if (item.run_id) {
+            const runLink = document.createElement("a");
+            runLink.href = "#";
+            runLink.className = "inline-link";
+            runLink.style.marginLeft = "8px";
+            runLink.textContent = `· View linked run (${item.run_id.slice(0, 8)}…)`;
+            runLink.addEventListener("click", (e) => {
+                e.preventDefault();
+                loadHistoricalRun(item.run_id);
+            });
+            activeReportMeta.append(runLink);
+        }
+    }
+
+    if (copyReportBtn) {
+        copyReportBtn.classList.remove("hidden");
+    }
+
+    for (const li of savedAnalysesList.querySelectorAll(".saved-analysis-item")) {
+        li.classList.toggle("active", li.dataset.reportId === item.id);
+    }
+}
+
+function clearActiveAnalysis() {
+    currentActiveReportId = null;
+    currentActiveReportMarkdown = "";
+    bugInput.value = "";
+    setResultMessage("Your AI-generated QA report will appear here.", "placeholder");
+    if (activeReportMeta) activeReportMeta.textContent = "";
+    if (copyReportBtn) copyReportBtn.classList.add("hidden");
+    if (savedAnalysesList) {
+        for (const li of savedAnalysesList.querySelectorAll(".saved-analysis-item")) {
+            li.classList.remove("active");
+        }
+    }
+    bugInput.focus();
+}
+
+async function copyReportMarkdown() {
+    if (!currentActiveReportMarkdown) return;
+    try {
+        await navigator.clipboard.writeText(currentActiveReportMarkdown);
+        if (copyBtnText) copyBtnText.textContent = "Copied!";
+        setTimeout(() => {
+            if (copyBtnText) copyBtnText.textContent = "Copy Markdown";
+        }, 2000);
+    } catch (err) {
+        console.error("Clipboard copy failed:", err);
+    }
+}
+
+if (newAnalysisBtn) newAnalysisBtn.addEventListener("click", clearActiveAnalysis);
+if (copyReportBtn) copyReportBtn.addEventListener("click", copyReportMarkdown);
+if (refreshSavedAnalysesBtn) refreshSavedAnalysesBtn.addEventListener("click", loadSavedAnalyses);
 
 analyzeBtn.addEventListener("click", async () => {
     const observation = bugInput.value.trim();
@@ -113,7 +314,15 @@ analyzeBtn.addEventListener("click", async () => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `Request failed with status ${response.status}.`);
         if (data.success === true) {
+            currentActiveReportMarkdown = data.report;
             result.replaceChildren(formatReport(data.report));
+            if (activeReportMeta) {
+                activeReportMeta.textContent = "Generated just now";
+            }
+            if (copyReportBtn) {
+                copyReportBtn.classList.remove("hidden");
+            }
+            loadSavedAnalyses();
         } else {
             setResultMessage(`Error: ${data.error || "Unknown error"}`, "error-message");
         }
@@ -193,33 +402,68 @@ function formatReport(report) {
     return output;
 }
 
-if (websiteRunForm) {
-    function updateRunModeFields() {
-        const loginMode = runModeSelect.value === "user-directed";
-        document.querySelector(".login-settings").classList.toggle("hidden", !loginMode);
-        const formSubmissionField = document.querySelector(".autonomous-only-field");
+function updateRunModeFields() {
+    if (!websiteRunForm || !runModeSelect) return;
+    const loginMode = runModeSelect.value === "user-directed";
+    const loginSettings = document.querySelector(".login-settings");
+    if (loginSettings) {
+        loginSettings.classList.toggle("hidden", !loginMode);
+    }
+    const formSubmissionField = document.querySelector(".autonomous-only-field");
+    if (formSubmissionField) {
         formSubmissionField.classList.toggle("hidden", loginMode);
-        document.getElementById("allowFormSubmission").disabled = loginMode;
-        for (const field of document.querySelectorAll(".login-only-field")) {
-            field.classList.toggle("hidden", !loginMode);
-            const input = field.querySelector("input");
-            if (input) {
-                const requiredSelector = "#loginUsernameSelector, #loginPasswordSelector, #loginSubmitSelector, #rejectionSelector, #testUsername, #testPassword";
-                input.required = loginMode && field.querySelector(requiredSelector) !== null;
-            }
-        }
-        const maxSteps = document.getElementById("runMaxSteps");
-        const timeout = document.getElementById("runTimeout");
-        maxSteps.min = loginMode ? "6" : "1";
-        maxSteps.max = loginMode ? "1000" : "50";
-        timeout.max = loginMode ? "3600" : "600";
-        if (!loginMode) {
-            if (Number(maxSteps.value) > 50) maxSteps.value = "20";
-            if (Number(timeout.value) > 600) timeout.value = "120";
-        }
+    }
+    const allowFormSubmission = document.getElementById("allowFormSubmission");
+    if (allowFormSubmission) {
+        allowFormSubmission.disabled = loginMode;
     }
 
+    const requiredLoginIds = new Set([
+        "loginUsernameSelector",
+        "loginPasswordSelector",
+        "loginSubmitSelector",
+        "rejectionSelector",
+        "testUsername",
+        "testPassword"
+    ]);
+
+    for (const field of document.querySelectorAll(".login-only-field")) {
+        field.classList.toggle("hidden", !loginMode);
+        const input = field.querySelector("input");
+        if (input) {
+            input.disabled = !loginMode;
+            const isRequired = loginMode && requiredLoginIds.has(input.id);
+            input.required = isRequired;
+            if (isRequired) {
+                input.setAttribute("required", "");
+            } else {
+                input.removeAttribute("required");
+            }
+        }
+    }
+    const maxSteps = document.getElementById("runMaxSteps");
+    const timeout = document.getElementById("runTimeout");
+    if (maxSteps) {
+        maxSteps.min = loginMode ? "6" : "1";
+        maxSteps.max = loginMode ? "1000" : "50";
+        if (!loginMode && Number(maxSteps.value) > 50) {
+            maxSteps.value = "20";
+        }
+    }
+    if (timeout) {
+        timeout.max = loginMode ? "3600" : "600";
+        if (!loginMode && Number(timeout.value) > 600) {
+            timeout.value = "120";
+        }
+    }
+}
+
+if (websiteRunForm) {
     runModeSelect.addEventListener("change", updateRunModeFields);
+    runModeSelect.addEventListener("input", updateRunModeFields);
+    websiteRunForm.addEventListener("reset", () => {
+        setTimeout(updateRunModeFields, 0);
+    });
     updateRunModeFields();
 
     websiteRunForm.addEventListener("submit", async (event) => {
@@ -273,7 +517,7 @@ if (websiteRunForm) {
             runStatus.textContent = `Run ${created.id}: starting…`;
             const credentials = payload.mode === "user-directed"
                 ? {
-                    username: document.getElementById("testUsername").value,
+                    username: document.getElementById("testUsername").value.trim(),
                     password: document.getElementById("testPassword").value
                 }
                 : null;
@@ -553,6 +797,120 @@ function appendParagraph(parent, label, value) {
     parent.append(paragraph);
 }
 
+function renderAiAnalysisSection(parent, runId, initialReports) {
+    const section = document.createElement("section");
+    section.className = "detail-section ai-analysis-section";
+    section.id = "runAiAnalysisSection";
+
+    const heading = document.createElement("div");
+    heading.className = "section-heading";
+    const title = document.createElement("h3");
+    title.textContent = "AI Failure Analysis";
+    const chip = document.createElement("span");
+    chip.className = "ai-chip";
+    chip.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12M12 8v8m-4-4h8"></path></svg> Gemini';
+    heading.append(title, chip);
+    section.append(heading);
+
+    const contentArea = document.createElement("div");
+    contentArea.className = "ai-analysis-content";
+    section.append(contentArea);
+
+    function displayReports(reports) {
+        contentArea.replaceChildren();
+        if (!reports || !reports.length) {
+            const emptyNotice = document.createElement("p");
+            emptyNotice.className = "muted";
+            emptyNotice.textContent = "No AI failure analysis has been generated for this run yet.";
+            const generateBtn = document.createElement("button");
+            generateBtn.className = "primary-button";
+            generateBtn.type = "button";
+            generateBtn.textContent = "Analyze with AI";
+            generateBtn.addEventListener("click", () => runAnalysis(false));
+            contentArea.append(emptyNotice, generateBtn);
+            return;
+        }
+
+        const latest = reports[0];
+        const card = document.createElement("article");
+        card.className = "run-step ai-analysis-card";
+
+        const cardHeader = document.createElement("div");
+        cardHeader.className = "step-heading";
+        const reportTitle = document.createElement("strong");
+        reportTitle.textContent = latest.title || "AI Failure Analysis";
+        const metaSpan = document.createElement("span");
+        metaSpan.className = "report-meta";
+        metaSpan.textContent = `${formatDate(latest.created_at)} · ${latest.model || "gemini"}`;
+        cardHeader.append(reportTitle, metaSpan);
+        card.append(cardHeader);
+
+        const formattedBody = formatReport(latest.report_markdown);
+        card.append(formattedBody);
+
+        const actionsBar = document.createElement("div");
+        actionsBar.className = "report-actions";
+        actionsBar.style.marginTop = "12px";
+
+        const reanalyzeBtn = document.createElement("button");
+        reanalyzeBtn.className = "secondary-button";
+        reanalyzeBtn.type = "button";
+        reanalyzeBtn.textContent = "Re-analyze with AI";
+        reanalyzeBtn.addEventListener("click", () => runAnalysis(true));
+
+        const workspaceBtn = document.createElement("button");
+        workspaceBtn.className = "secondary-button";
+        workspaceBtn.type = "button";
+        workspaceBtn.textContent = "Open in AI Workspace";
+        workspaceBtn.addEventListener("click", () => {
+            setActivePage("ai-bug");
+            selectSavedAnalysis(latest);
+        });
+
+        actionsBar.append(reanalyzeBtn, workspaceBtn);
+        card.append(actionsBar);
+        contentArea.append(card);
+    }
+
+    async function runAnalysis(forceRefresh) {
+        const checkedBoxes = section.parentElement.querySelectorAll(".finding-select-box:checked");
+        const selectedErrorIds = Array.from(checkedBoxes).map((box) => box.dataset.errorId);
+
+        contentArea.replaceChildren();
+        const loadingDiv = document.createElement("div");
+        loadingDiv.className = "loading";
+        loadingDiv.textContent = "Analyzing test run with AI…";
+        contentArea.append(loadingDiv);
+
+        try {
+            const result = await requestJson(`/test-runs/${encodeURIComponent(runId)}/analyze`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    force_refresh: forceRefresh,
+                    browser_error_ids: selectedErrorIds
+                })
+            });
+            displayReports([result]);
+            loadSavedAnalyses().catch(() => {});
+        } catch (error) {
+            contentArea.replaceChildren();
+            const errorMsg = document.createElement("p");
+            errorMsg.className = "error-message";
+            errorMsg.textContent = `Analysis failed: ${error.message}`;
+            const retryBtn = document.createElement("button");
+            retryBtn.className = "secondary-button";
+            retryBtn.type = "button";
+            retryBtn.textContent = "Retry analysis";
+            retryBtn.addEventListener("click", () => runAnalysis(forceRefresh));
+            contentArea.append(errorMsg, retryBtn);
+        }
+    }
+
+    displayReports(initialReports);
+    parent.append(section);
+}
+
 async function loadHistoricalRun(runId) {
     setActivePage("reports");
     historyDetails.replaceChildren();
@@ -562,9 +920,11 @@ async function loadHistoricalRun(runId) {
     historyDetails.append(loadingMessage);
 
     try {
-        const [run, steps] = await Promise.all([
+        const [run, steps, browserErrors, aiReports] = await Promise.all([
             requestJson(`/test-runs/${encodeURIComponent(runId)}`),
-            requestJson(`/test-runs/${encodeURIComponent(runId)}/steps`)
+            requestJson(`/test-runs/${encodeURIComponent(runId)}/steps`),
+            requestJson(`/test-runs/${encodeURIComponent(runId)}/browser-errors`).catch(() => []),
+            requestJson(`/test-runs/${encodeURIComponent(runId)}/ai-bug-reports`).catch(() => [])
         ]);
 
         let executionLogs;
@@ -599,9 +959,11 @@ async function loadHistoricalRun(runId) {
         for (const [label, value] of [
             ["Platform", run.platform],
             ["Mode", run.mode],
+            ["Target", run.target || "None"],
             ["Execution", executionStatusLabel(run)],
             ["Assertions", assertionResultLabel(run)],
             ["Suspected bugs", String(run.suspected_bug_count ?? 0)],
+            ["Browser findings", String(browserErrors.length)],
             ["Execution error", run.execution_error || "None"],
             ["Created", formatDate(run.created_at)],
             ["Duration", run.started_at && run.ended_at
@@ -674,6 +1036,45 @@ async function loadHistoricalRun(runId) {
             stepsSection.append(card);
         }
         historyDetails.append(stepsSection);
+
+        const browserErrorsSection = document.createElement("section");
+        browserErrorsSection.className = "detail-section";
+        const browserErrorsHeading = document.createElement("h3");
+        browserErrorsHeading.textContent = `Browser findings (${browserErrors.length})`;
+        browserErrorsSection.append(browserErrorsHeading);
+        if (!browserErrors.length) {
+            appendParagraph(browserErrorsSection, "", "No browser errors were detected for this run.");
+        } else {
+            for (const error of browserErrors) {
+                const card = document.createElement("article");
+                card.className = "run-step";
+                card.dataset.status = "error";
+                const cardHeading = document.createElement("div");
+                cardHeading.className = "step-heading";
+                const name = document.createElement("strong");
+                const stepPrefix = error.step_number ? `Step ${error.step_number} · ` : "";
+                name.textContent = `${stepPrefix}${error.category}${error.http_status ? ` (${error.http_status})` : ""}`;
+
+                const selectLabel = document.createElement("label");
+                selectLabel.className = "finding-select-label";
+                const selectBox = document.createElement("input");
+                selectBox.type = "checkbox";
+                selectBox.className = "finding-select-box";
+                selectBox.dataset.errorId = error.id;
+                selectLabel.append(selectBox, document.createTextNode("Select for AI"));
+
+                cardHeading.append(name, createStatusBadge("error"), selectLabel);
+                card.append(cardHeading);
+                appendParagraph(card, "Message", error.message);
+                if (error.url) appendParagraph(card, "URL", error.url);
+                if (error.resource_type) appendParagraph(card, "Resource type", error.resource_type);
+                appendParagraph(card, "Timestamp", formatDate(error.timestamp));
+                browserErrorsSection.append(card);
+            }
+        }
+        historyDetails.append(browserErrorsSection);
+
+        renderAiAnalysisSection(historyDetails, runId, aiReports);
 
         const logsSection = document.createElement("section");
         logsSection.className = "detail-section";
@@ -815,12 +1216,15 @@ historyNextBtn.addEventListener("click", () => {
         loadExecutionHistory();
     }
 });
-document.getElementById("refreshDashboardBtn").addEventListener("click", async () => {
-    await Promise.all([checkBackendConnection(), loadDashboardSummary(), loadExecutionHistory()]);
-});
+const refreshDashboardBtn = document.getElementById("refreshDashboardBtn");
+if (refreshDashboardBtn) {
+    refreshDashboardBtn.addEventListener("click", async () => {
+        await Promise.all([checkBackendConnection(), loadDashboardSummary(), loadExecutionHistory()]);
+    });
+}
 
 bootstrapSession()
-    .then(() => Promise.all([checkBackendConnection(), loadDashboardSummary(), loadExecutionHistory()]))
+    .then(() => Promise.all([checkBackendConnection(), loadDashboardSummary(), loadExecutionHistory(), loadSavedAnalyses()]))
     .catch((error) => {
         console.error(error);
         document.getElementById("backendStatusText").textContent = "Secure session unavailable";

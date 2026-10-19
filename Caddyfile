@@ -1,0 +1,20 @@
+{$STAGING_DOMAIN:qai.internal.example.com} {
+    # Mandatory Proxy Authentication for staging protection
+    # Generate bcrypt hash interactively using:
+    #   docker run --rm -i caddy:2-alpine caddy hash-password
+    basic_auth {
+        qa_tester {$STAGING_BASIC_AUTH_HASH}
+    }
+
+    # Optional: Network perimeter restriction (VPN / private subnet allowlist)
+    # @internal remote_ip 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1/32
+    # handle @internal { ... }
+
+    # Reverse proxy to the internal FastAPI service on the container bridge network
+    reverse_proxy qai-app:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

@@ -20,6 +20,7 @@ _ASSERTION_ACTIONS = {
     "check_visibility",
     "verify_authentication",
     "autonomous:assert_visible",
+    "autonomous:assert_outcome",
 }
 
 
@@ -37,8 +38,9 @@ def _text(value: Any) -> str:
     if value is None:
         return ""
     text = str(value)
+    text = _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
     text = _SECRET_PATTERN.sub(r"\1=[REDACTED]", text)
-    return _BEARER_PATTERN.sub("Bearer [REDACTED]", text)
+    return text
 
 
 def _report_directory(run_id: str) -> Path:
@@ -83,6 +85,7 @@ def generate_excel_report(data: dict[str, Any]) -> Path:
         ("Platform", run.platform),
         ("Mode", run.mode),
         ("Status", run.status),
+        ("Target", run.target),
         ("Assertion result", run.assertion_result),
         ("Suspected bug count", run.suspected_bug_count),
         ("Assertions passed", run.assertion_passed_count),
@@ -180,6 +183,47 @@ def generate_excel_report(data: dict[str, Any]) -> Path:
             ]
         )
 
+    browser_errors = data.get("browser_errors") or []
+    if browser_errors:
+        browser_sheet = workbook.create_sheet("Browser Errors")
+        browser_sheet.append(
+            [
+                "Step number",
+                "Category",
+                "HTTP status",
+                "Resource type",
+                "URL",
+                "Message",
+                "Timestamp",
+            ]
+        )
+        for error in browser_errors:
+            browser_sheet.append(
+                [
+                    error.step_number if error.step_number is not None else "",
+                    error.category,
+                    error.http_status if error.http_status is not None else "",
+                    error.resource_type or "",
+                    _text(error.url),
+                    _text(error.message),
+                    error.timestamp.isoformat(),
+                ]
+            )
+
+    ai_reports = data.get("ai_bug_reports") or []
+    if ai_reports:
+        ai_sheet = workbook.create_sheet("AI Failure Analysis")
+        ai_sheet.append(["Title", "Model", "Created at", "Analysis Report"])
+        for rep in ai_reports:
+            ai_sheet.append(
+                [
+                    _text(rep.title),
+                    _text(rep.model),
+                    rep.created_at.isoformat(),
+                    _text(rep.report_markdown),
+                ]
+            )
+
     for sheet in workbook.worksheets:
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
@@ -261,6 +305,33 @@ def generate_html_report(data: dict[str, Any], base_url: str) -> Path:
     if not logs:
         logs.append("<li>No execution logs were recorded.</li>")
 
+    browser_items = []
+    for error in data.get("browser_errors") or []:
+        step_label = f"Step {error.step_number}: " if error.step_number is not None else ""
+        status_label = f" (Status {error.http_status})" if error.http_status else ""
+        type_label = f" [{escape(error.resource_type)}]" if error.resource_type else ""
+        browser_items.append(
+            "<article class=\"step\">"
+            f"<h3>{escape(step_label)}{escape(error.category)}{status_label}{type_label}</h3>"
+            f"<p><strong>Message:</strong> {escape(_text(error.message))}</p>"
+            f"<p><strong>URL:</strong> {escape(_text(error.url)) or 'None recorded'}</p>"
+            f"<p><strong>Timestamp:</strong> {escape(error.timestamp.isoformat())}</p>"
+            "</article>"
+        )
+    if not browser_items:
+        browser_items.append("<p>No browser errors were detected.</p>")
+
+    ai_items = []
+    for rep in data.get("ai_bug_reports") or []:
+        ai_items.append(
+            "<article class=\"step\">"
+            f"<h3>{escape(_text(rep.title))}</h3>"
+            f"<p><strong>Model:</strong> {escape(_text(rep.model))}</p>"
+            f"<p><strong>Generated:</strong> {escape(rep.created_at.isoformat())}</p>"
+            f"<pre style=\"white-space:pre-wrap;font-family:inherit;\">{escape(_text(rep.report_markdown))}</pre>"
+            "</article>"
+        )
+
     failure_summary = _failure_summary(run, data["steps"])
     content = f"""<!doctype html>
 <html lang="en">
@@ -282,6 +353,7 @@ dt{{font-weight:bold;margin-top:8px}} dd{{margin-left:0}}
 <dt>Platform</dt><dd>{escape(run.platform)}</dd>
 <dt>Mode</dt><dd>{escape(run.mode)}</dd>
 <dt>Status</dt><dd>{escape(run.status)}</dd>
+<dt>Target</dt><dd>{escape(_text(run.target))}</dd>
 <dt>Assertion result</dt><dd>{escape(run.assertion_result)}</dd>
 <dt>Suspected bug count</dt><dd>{run.suspected_bug_count}</dd>
 <dt>Assertions passed</dt><dd>{run.assertion_passed_count}</dd>
@@ -297,6 +369,10 @@ dt{{font-weight:bold;margin-top:8px}} dd{{margin-left:0}}
 </dl>
 <h2>Test Steps</h2>
 {''.join(rows)}
+<h2>Browser Findings</h2>
+{''.join(browser_items)}
+<h2>AI Failure Analysis</h2>
+{''.join(ai_items) if ai_items else '<p>No AI failure analysis recorded.</p>'}
 <h2>Bug Reports</h2>
 {''.join(bugs)}
 <h2>Execution Logs</h2>
